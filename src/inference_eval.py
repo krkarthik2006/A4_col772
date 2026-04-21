@@ -25,6 +25,13 @@ LANGUAGE_LABELS = {
     "tamil":   "Tamil",
 }
 
+# Must exactly match the constants in dataset_generation.py so the student is
+# evaluated under the same instructional context it was trained in.
+GENERATION_SYSTEM_MESSAGE = (
+    "You are a careful multilingual reasoning assistant that follows "
+    "the requested output format exactly."
+)
+
 # Answer extraction: strict tag first, then last-resort scan
 ANSWER_TAG_RE = re.compile(r"####\s*ANSWER\s*:\s*\(?([A-J])\)?", re.IGNORECASE)
 FREEFORM_RE   = re.compile(
@@ -117,23 +124,46 @@ def extract_answer(text: str) -> str:
     return ""
 
 
+def _format_teacher_prompt(instruction: str, language: str) -> str:
+    """Mirror of format_teacher_prompt in dataset_generation.py."""
+    lang_name = LANGUAGE_LABELS.get(canonical_language(language), language.title())
+    return (
+        "You are creating multilingual knowledge-distillation training data.\n"
+        "Solve the following multiple-choice question carefully.\n\n"
+        "Output rules:\n"
+        f"1. Write the full reasoning only in {lang_name}.\n"
+        "2. Put all reasoning inside <reasoning> and </reasoning> tags.\n"
+        "3. After the reasoning block, write exactly one final line in the format "
+        "'#### ANSWER: [LETTER]'.\n"
+        "4. The final answer letter must be one of A-J.\n"
+        "5. Do not output anything after the final answer line.\n\n"
+        "Question:\n"
+        f"{instruction}"
+    )
+
+
 def build_inference_prompt(row: dict) -> list[dict]:
-    """
-    Build the user-turn message for inference, matching the training prompt format exactly.
-    Training used: "{question}\n\n(A) opt\n(B) opt\n..." with no extra system instruction.
-    """
+    """Build the chat messages for inference with the same system + format context
+    the teacher used at generation time, matching the student's training distribution."""
     options = row.get("options", [])
     question_text = row.get("question", "")
+    language = row.get("language", "en")
 
     if options:
         letters = "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
         choices = "\n".join(f"({letters[i]}) {opt}" for i, opt in enumerate(options))
-        content = f"{question_text}\n\n{choices}"
+        instruction = f"{question_text}\n\n{choices}"
     else:
         # question field already contains formatted options (train.jsonl style)
-        content = question_text
+        instruction = question_text
 
-    return [{"role": "user", "content": content}]
+    # Use stored prompt when available (already formatted); otherwise reconstruct.
+    user_content = row.get("prompt") or _format_teacher_prompt(instruction, language)
+
+    return [
+        {"role": "system", "content": GENERATION_SYSTEM_MESSAGE},
+        {"role": "user",   "content": user_content},
+    ]
 
 
 def _batched(items: list, n: int):

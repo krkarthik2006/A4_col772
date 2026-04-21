@@ -15,7 +15,8 @@ echo ""
 echo "[Part A] Generating teacher distillation data..."
 python3 src/dataset_generation.py \
   --teacher_model /models/Qwen2.5-7B-Instruct \
-  --output_file outputs/train.jsonl
+  --output_file outputs/train.jsonl \
+  --top_k_logits 10
 echo "[Part A] Done. Saved to outputs/train.jsonl"
 
 # ── Val set creation ────────────────────────────────────────────────────────
@@ -36,9 +37,12 @@ python3 src/train_distill.py \
   --output_dir outputs/qwen_lora \
   --batch_size 4 \
   --gradient_accumulation_steps 8 \
-  --epochs 3 \
+  --epochs 5 \
   --lr 2e-4 \
-  --mask_prompt_tokens
+  --mask_prompt_tokens \
+  --top_k_logits 10 \
+  --kd_alpha 0.5 \
+  --kd_temperature 2.0
 echo "[Part B] Qwen training done. Adapter at outputs/qwen_lora"
 
 # ── Part B: Train LLaMA student ─────────────────────────────────────────────
@@ -50,7 +54,7 @@ python3 src/train_distill.py \
   --output_dir outputs/llama_lora \
   --batch_size 4 \
   --gradient_accumulation_steps 8 \
-  --epochs 3 \
+  --epochs 5 \
   --lr 2e-4 \
   --mask_prompt_tokens
 echo "[Part B] LLaMA training done. Adapter at outputs/llama_lora"

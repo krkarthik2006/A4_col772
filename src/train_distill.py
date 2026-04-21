@@ -29,6 +29,36 @@ RESPONSE_TEMPLATES: dict[str, str] = {
     "llama": "<|start_header_id|>assistant<|end_header_id|>\n\n",
 }
 
+# Must match GENERATION_SYSTEM_MESSAGE and format_teacher_prompt in dataset_generation.py
+# exactly so training and inference context matches the teacher's generation context.
+GENERATION_SYSTEM_MESSAGE = (
+    "You are a careful multilingual reasoning assistant that follows "
+    "the requested output format exactly."
+)
+_LANG_NAMES: dict[str, str] = {
+    "en": "English", "english": "English",
+    "hindi": "Hindi", "bengali": "Bengali",
+    "kannada": "Kannada", "tamil": "Tamil",
+}
+
+
+def _format_teacher_prompt(instruction: str, language: str) -> str:
+    """Replicate format_teacher_prompt from dataset_generation.py."""
+    lang_name = _LANG_NAMES.get(language.strip().lower(), language.title())
+    return (
+        "You are creating multilingual knowledge-distillation training data.\n"
+        "Solve the following multiple-choice question carefully.\n\n"
+        "Output rules:\n"
+        f"1. Write the full reasoning only in {lang_name}.\n"
+        "2. Put all reasoning inside <reasoning> and </reasoning> tags.\n"
+        "3. After the reasoning block, write exactly one final line in the format "
+        "'#### ANSWER: [LETTER]'.\n"
+        "4. The final answer letter must be one of A-J.\n"
+        "5. Do not output anything after the final answer line.\n\n"
+        "Question:\n"
+        f"{instruction}"
+    )
+
 
 def setup_logger(level: str) -> None:
     numeric_level = getattr(logging, level.upper(), logging.INFO)
@@ -200,15 +230,28 @@ def build_training_text(row: dict, tokenizer, max_question_tokens: int = 1200) -
     final_answer = row.get("final_answer") or row.get("gold_answer", "")
     reasoning = row.get("reasoning", "").strip()
 
-    question = _fit_question(row["question"], final_answer, tokenizer, max_question_tokens)
-
-    assistant_content = (
-        f"<reasoning>\n{reasoning}\n</reasoning>\n"
-        f"#### ANSWER: ({final_answer})"
+    # User content: use the stored formatted prompt (includes language instructions
+    # + question) so the student sees the same context as the teacher at generation
+    # time.  Fall back to reconstructing it from raw fields for old JSONL files.
+    user_content = row.get("prompt") or _format_teacher_prompt(
+        _fit_question(row["question"], final_answer, tokenizer, max_question_tokens),
+        row.get("language", "en"),
     )
 
+    # Assistant content: use exact teacher generation for tokenization alignment;
+    # fall back to manual template only when the field is absent.
+    teacher_gen = (row.get("teacher_generation") or "").strip()
+    if teacher_gen:
+        assistant_content = teacher_gen
+    else:
+        assistant_content = (
+            f"<reasoning>\n{reasoning}\n</reasoning>\n"
+            f"#### ANSWER: ({final_answer})"
+        )
+
     messages = [
-        {"role": "user",      "content": question},
+        {"role": "system",    "content": GENERATION_SYSTEM_MESSAGE},
+        {"role": "user",      "content": user_content},
         {"role": "assistant", "content": assistant_content},
     ]
     return tokenizer.apply_chat_template(
@@ -224,8 +267,8 @@ def prepare_dataset(
 ) -> Dataset:
     """Load and format JSONL into a HuggingFace Dataset with a single 'text' column."""
     rows = load_training_rows(data_path, filter_correct_only=filter_correct_only)
-    # Reserve 848 tokens for response (reasoning + answer); question gets the rest.
-    max_question_tokens = max_length - 848
+    # Reserve 848 for response + 250 for system message and format instructions.
+    max_question_tokens = max_length - 848 - 250
     texts = [build_training_text(r, tokenizer, max_question_tokens=max_question_tokens) for r in rows]
     return Dataset.from_dict({"text": texts})
 
@@ -274,49 +317,82 @@ def tokenize_with_kd(
     Index i in those tensors corresponds to model logits[:, i, :], i.e. the
     distribution that predicts input_ids[i+1].  Positions without teacher data
     are filled with -1 / 0.0 and masked out in the KD loss.
+
+    When teacher_generated_ids is present (same-family Qwen→Qwen KD), the exact
+    vLLM token IDs are concatenated directly after the prompt to guarantee 1:1
+    alignment between teacher_top_k_logits[j] and the student's prediction at
+    position (len(prompt_ids) + j).  This bypasses BPE re-tokenization artefacts
+    that arise when the full chat string is encoded as one piece.
     """
-    text = build_training_text(row, tokenizer)
-    enc = tokenizer(
-        text,
-        truncation=True,
-        max_length=max_length,
-        padding=False,
-        return_tensors=None,
-    )
-    input_ids: list = enc["input_ids"]
-    seq_len = len(input_ids)
+    teacher_ids: list[int] | None = row.get("teacher_generated_ids")
 
-    # Build labels: -100 everywhere; unmask from the first response token onward.
-    labels = [-100] * seq_len
-    template_pos = _find_sublist(input_ids, response_template_ids)
-    logit_offset = -1
-    if template_pos >= 0:
-        resp_start = template_pos + len(response_template_ids)
-        labels[resp_start:] = input_ids[resp_start:]
-        # logits[logit_offset] predicts input_ids[resp_start] — the first
-        # response token — so teacher logit j maps to logit position logit_offset+j.
-        logit_offset = resp_start - 1
+    if teacher_ids:
+        # ── Direct-alignment path (same-family KD) ────────────────────────────
+        # Reconstruct the exact prompt string the teacher saw, then encode only
+        # that prefix so we can splice in the teacher's own token IDs verbatim.
+        user_content = row.get("prompt") or _format_teacher_prompt(
+            row["question"], row.get("language", "en")
+        )
+        prompt_text = tokenizer.apply_chat_template(
+            [
+                {"role": "system", "content": GENERATION_SYSTEM_MESSAGE},
+                {"role": "user",   "content": user_content},
+            ],
+            tokenize=False,
+            add_generation_prompt=True,
+        )
+        prompt_ids: list[int] = tokenizer.encode(prompt_text, add_special_tokens=False)
 
-    # Initialise teacher tensors with "no data" sentinel.
-    t_ids = [[-1] * top_k for _ in range(seq_len)]
+        eos_id = tokenizer.eos_token_id or 0
+        full_ids = (prompt_ids + teacher_ids + [eos_id])[:max_length]
+        seq_len = len(full_ids)
+
+        n_prompt = min(len(prompt_ids), seq_len)
+        labels = [-100] * n_prompt + full_ids[n_prompt:]
+        attn_mask = [1] * seq_len
+        logit_offset = n_prompt - 1
+
+    else:
+        # ── Fallback: re-tokenise the full chat string ────────────────────────
+        text = build_training_text(row, tokenizer)
+        enc = tokenizer(
+            text,
+            truncation=True,
+            max_length=max_length,
+            padding=False,
+            return_tensors=None,
+        )
+        full_ids: list[int] = enc["input_ids"]
+        attn_mask: list[int] = enc["attention_mask"]
+        seq_len = len(full_ids)
+
+        labels = [-100] * seq_len
+        template_pos = _find_sublist(full_ids, response_template_ids)
+        logit_offset = -1
+        if template_pos >= 0:
+            resp_start = template_pos + len(response_template_ids)
+            labels[resp_start:] = full_ids[resp_start:]
+            logit_offset = resp_start - 1
+
+    # ── Align teacher logits ──────────────────────────────────────────────────
+    t_ids  = [[-1]  * top_k for _ in range(seq_len)]
     t_vals = [[0.0] * top_k for _ in range(seq_len)]
 
     raw_logits = row.get("teacher_top_k_logits")
     if raw_logits and logit_offset >= 0:
         for j, tok_topk in enumerate(raw_logits):
             pos = logit_offset + j
-            # pos >= seq_len-1: no label exists for the next token, skip.
             if pos >= seq_len - 1:
                 break
             for k_idx, pair in enumerate(tok_topk[:top_k]):
-                t_ids[pos][k_idx] = pair[0]
+                t_ids[pos][k_idx]  = pair[0]
                 t_vals[pos][k_idx] = pair[1]
 
     return {
-        "input_ids": input_ids,
-        "attention_mask": enc["attention_mask"],
-        "labels": labels,
-        "teacher_top_k_ids": t_ids,
+        "input_ids":          full_ids,
+        "attention_mask":     attn_mask,
+        "labels":             labels,
+        "teacher_top_k_ids":  t_ids,
         "teacher_top_k_vals": t_vals,
     }
 
@@ -406,11 +482,16 @@ class KDTrainer(Trainer):
         safe_ids = t_ids.clamp(min=0)                              # [B, L, K]
         s_topk = student_logits.gather(dim=-1, index=safe_ids)    # [B, L, K]
 
-        # Renormalise both distributions over top-K with temperature T.
+        # Teacher: renormalise top-K distribution with temperature T.
         # t_vals are log-probs; dividing by T and applying softmax gives
         # p_T(k) ∝ p_teacher(k)^(1/T), consistent with the paper's formula.
         t_log_probs = F.log_softmax(t_vals / T, dim=-1)   # [B, L, K]
-        s_log_probs = F.log_softmax(s_topk / T, dim=-1)   # [B, L, K]
+
+        # Student: compute log-probs over the FULL vocabulary so that probability
+        # mass leaking to non-top-K tokens is correctly penalized.
+        student_logits_scaled = student_logits / T
+        lse = torch.logsumexp(student_logits_scaled, dim=-1, keepdim=True)  # [B, L, 1]
+        s_log_probs = s_topk / T - lse  # [B, L, K]
 
         # KL(p_T || p_S) per position, using F.kl_div which handles 0·log0 = 0.
         kl = F.kl_div(s_log_probs, t_log_probs.exp(), reduction="none").sum(dim=-1)  # [B, L]

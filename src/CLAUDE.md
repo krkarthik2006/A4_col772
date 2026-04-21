@@ -104,3 +104,22 @@ Handles normalization across answer formats (letter, index, digit string), langu
 
 ## Design Notes (PART_A_DESIGN.md)
 The `PART_A_DESIGN.md` file documents every major function and decision in Part A in detail — consult it before modifying `dataset_generation.py`.
+
+## Top-K KD Implementation Details
+
+### Corrected KD Loss (`train_distill.py` — `KDTrainer.compute_loss`)
+The student's log-probabilities must be computed over the **full vocabulary**, not just the top-K slice. Wrong: `F.log_softmax(s_topk / T, dim=-1)` (normalizes over K tokens only). Correct:
+```python
+lse = torch.logsumexp(student_logits / T, dim=-1, keepdim=True)  # [B, L, 1]
+s_log_probs = s_topk / T - lse  # [B, L, K]
+```
+Teacher log-probs (`t_vals`) are renormalized over top-K — this is intentional.
+
+### Tokenization Alignment (`train_distill.py` — `build_training_text`)
+`row["teacher_generation"]` is the **exact raw string** the teacher produced; its tokenization aligns with the stored `teacher_top_k_logits`. Always use it as the assistant content when present; fall back to the manual `<reasoning>…</reasoning>\n#### ANSWER:` template only when the field is absent (e.g., SFT-only rows).
+
+### Retry Logprob Sync (`dataset_generation.py` — `_retry_unparsed`)
+When `top_k_logits > 0`, retries must use `generate_and_parse_batch_with_logprobs` and update `batch_logprobs[i]` in-place alongside `parsed_batch[i]`. Failing to do so leaves stale logits (from the failed first attempt) misaligned with the new generation text.
+
+### Output JSONL Schema (updated)
+Each record also contains: `teacher_top_k_logits` — list of per-token top-K `(token_id, log_prob)` pairs, or `null` when `--top_k_logits 0`.

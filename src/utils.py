@@ -91,13 +91,18 @@ def prompt_vllm_with_logprobs(
 
     texts: list[str] = []
     all_logprobs: list[list[list[tuple[int, float]]]] = []
+    all_token_ids: list[list[int]] = []
     for output in outputs:
         if not output.outputs:
             texts.append('')
             all_logprobs.append([])
+            all_token_ids.append([])
             continue
         out = output.outputs[0]
         texts.append(out.text)
+        # Capture the exact token IDs the teacher generated so callers can
+        # bypass re-tokenization and guarantee 1:1 logit alignment.
+        all_token_ids.append(list(out.token_ids))
         token_logprobs: list[list[tuple[int, float]]] = []
         for step_lps in (out.logprobs or []):
             # step_lps: dict[int, Logprob]; Logprob.logprob is the log-probability
@@ -109,4 +114,4 @@ def prompt_vllm_with_logprobs(
             token_logprobs.append(pairs)
         all_logprobs.append(token_logprobs)
 
-    return texts, all_logprobs
+    return texts, all_logprobs, all_token_ids
