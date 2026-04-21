@@ -1,0 +1,33 @@
+#!/bin/bash
+#PBS -N km_a4
+#PBS -P col772.cs1230298.course
+#PBS -l select=1:ncpus=8:ngpus=1
+#PBS -l walltime=04:00:00
+#PBS -q scai_q
+
+
+
+module load apps/apptainer/1.4.0
+
+# Update this only if you submit from a different directory.
+BASE="${PBS_O_WORKDIR:-/home/cse/btech/cs1230298/a4}"
+cd "$BASE"
+
+export WANDB_DISABLED=true
+export CUDA_VISIBLE_DEVICES=0
+export TRANSFORMERS_OFFLINE=1
+export HF_DATASETS_OFFLINE=1
+export HF_HUB_OFFLINE=1
+
+mkdir -p outputs
+
+echo "====== Starting COL772 A4 Run ======"
+
+time apptainer run \
+    --nv \
+    --bind "$(pwd)":/workspace \
+    --bind /scratch/scai/phd/aiz248311/col772/a4/models:/models \
+    /scratch/scai/phd/aiz248311/col772/a4/vllm126.sif \
+    bash /workspace/run.sh
+
+echo "====== Run Complete ======"

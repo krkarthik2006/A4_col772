@@ -60,3 +60,53 @@ def prompt_vllm(
     )
     outputs = llm.generate(prompts, sampling_params, use_tqdm=use_tqdm)
     return [output.outputs[0].text if output.outputs else '' for output in outputs]
+
+
+def prompt_vllm_with_logprobs(
+    llm,
+    tokenizer,
+    batch_messages: Iterable[list[dict]],
+    top_k: int,
+    max_new_tokens: int = 16,
+    temperature: float = 0.0,
+    top_p: float = 1.0,
+    use_tqdm: bool = True,
+):
+    """Like prompt_vllm but also returns top-K log-probs per generated token.
+
+    Returns:
+        texts: list of generated strings
+        all_logprobs: list of lists; each inner list has one entry per generated
+            token, and each entry is a list of (token_id, log_prob) pairs sorted
+            by log_prob descending (length <= top_k).
+    """
+    prompts = [build_vllm_prompt(tokenizer, messages) for messages in batch_messages]
+    sampling_params = SamplingParams(
+        temperature=temperature,
+        top_p=top_p,
+        max_tokens=max_new_tokens,
+        logprobs=top_k,
+    )
+    outputs = llm.generate(prompts, sampling_params, use_tqdm=use_tqdm)
+
+    texts: list[str] = []
+    all_logprobs: list[list[list[tuple[int, float]]]] = []
+    for output in outputs:
+        if not output.outputs:
+            texts.append('')
+            all_logprobs.append([])
+            continue
+        out = output.outputs[0]
+        texts.append(out.text)
+        token_logprobs: list[list[tuple[int, float]]] = []
+        for step_lps in (out.logprobs or []):
+            # step_lps: dict[int, Logprob]; Logprob.logprob is the log-probability
+            pairs = sorted(
+                [(tok_id, lp.logprob) for tok_id, lp in step_lps.items()],
+                key=lambda x: x[1],
+                reverse=True,
+            )[:top_k]
+            token_logprobs.append(pairs)
+        all_logprobs.append(token_logprobs)
+
+    return texts, all_logprobs
