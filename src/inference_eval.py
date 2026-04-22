@@ -124,18 +124,23 @@ def extract_answer(text: str) -> str:
     return ""
 
 
-def _format_teacher_prompt(instruction: str, language: str) -> str:
-    """Mirror of format_teacher_prompt in dataset_generation.py."""
-    lang_name = LANGUAGE_LABELS.get(canonical_language(language), language.title())
+def _format_student_prompt(instruction: str, language: str = "") -> str:
+    """Build the prompt the student will see at train/inference time."""
+    lang_instruction = (
+        "1. Identify the core concept or formula needed to solve this question."
+        if language in ("en", "english") else
+        "1. First, translate the question to English. Then, identify the core concept needed."
+    )
+    
     return (
-        "You are creating multilingual knowledge-distillation training data.\n"
-        "Solve the following multiple-choice question carefully.\n\n"
+        "You are an expert multilingual reasoning assistant.\n"
+        "Your task is to provide the step-by-step reasoning that leads to the correct answer.\n\n"
         "Output rules:\n"
-        f"1. Write the full reasoning only in {lang_name}.\n"
-        "2. Put all reasoning inside <reasoning> and </reasoning> tags.\n"
-        "3. After the reasoning block, write exactly one final line in the format "
-        "'#### ANSWER: [LETTER]'.\n"
-        "4. The final answer letter must be one of A-J.\n"
+        f"{lang_instruction}\n"
+        "2. Write all your reasoning and analysis entirely in English.\n"
+        "3. Put all reasoning inside <reasoning> and </reasoning> tags.\n"
+        "4. After the reasoning block, write exactly one final line in the format "
+        "'#### ANSWER: (LETTER)'.\n"
         "5. Do not output anything after the final answer line.\n\n"
         "Question:\n"
         f"{instruction}"
@@ -157,8 +162,8 @@ def build_inference_prompt(row: dict) -> list[dict]:
         # question field already contains formatted options (train.jsonl style)
         instruction = question_text
 
-    # Use stored prompt when available (already formatted); otherwise reconstruct.
-    user_content = row.get("prompt") or _format_teacher_prompt(instruction, language)
+    # Always construct the student prompt from scratch during inference.
+    user_content = _format_student_prompt(instruction, language)
 
     return [
         {"role": "system", "content": GENERATION_SYSTEM_MESSAGE},

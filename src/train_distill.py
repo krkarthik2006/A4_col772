@@ -26,7 +26,7 @@ LOGGER = logging.getLogger(__name__)
 # start of the assistant turn so prompt tokens can be masked out of the loss.
 RESPONSE_TEMPLATES: dict[str, str] = {
     "qwen":  "<|im_start|>assistant\n",
-    "llama": "<|start_header_id|>assistant<|end_header_id|>\n\n",
+    "llama": "<|start_header_id|>assistant<|end_header_id|>",
 }
 
 # Must match GENERATION_SYSTEM_MESSAGE and format_teacher_prompt in dataset_generation.py
@@ -42,18 +42,23 @@ _LANG_NAMES: dict[str, str] = {
 }
 
 
-def _format_teacher_prompt(instruction: str, language: str) -> str:
-    """Replicate format_teacher_prompt from dataset_generation.py."""
-    lang_name = _LANG_NAMES.get(language.strip().lower(), language.title())
+def _format_student_prompt(instruction: str, language: str = "") -> str:
+    """Build the prompt the student will see at train/inference time."""
+    lang_instruction = (
+        "1. Identify the core concept or formula needed to solve this question."
+        if language in ("en", "english") else
+        "1. First, translate the question to English. Then, identify the core concept needed."
+    )
+    
     return (
-        "You are creating multilingual knowledge-distillation training data.\n"
-        "Solve the following multiple-choice question carefully.\n\n"
+        "You are an expert multilingual reasoning assistant.\n"
+        "Your task is to provide the step-by-step reasoning that leads to the correct answer.\n\n"
         "Output rules:\n"
-        f"1. Write the full reasoning only in {lang_name}.\n"
-        "2. Put all reasoning inside <reasoning> and </reasoning> tags.\n"
-        "3. After the reasoning block, write exactly one final line in the format "
-        "'#### ANSWER: [LETTER]'.\n"
-        "4. The final answer letter must be one of A-J.\n"
+        f"{lang_instruction}\n"
+        "2. Write all your reasoning and analysis entirely in English.\n"
+        "3. Put all reasoning inside <reasoning> and </reasoning> tags.\n"
+        "4. After the reasoning block, write exactly one final line in the format "
+        "'#### ANSWER: (LETTER)'.\n"
         "5. Do not output anything after the final answer line.\n\n"
         "Question:\n"
         f"{instruction}"
@@ -230,10 +235,9 @@ def build_training_text(row: dict, tokenizer, max_question_tokens: int = 1200) -
     final_answer = row.get("final_answer") or row.get("gold_answer", "")
     reasoning = row.get("reasoning", "").strip()
 
-    # User content: use the stored formatted prompt (includes language instructions
-    # + question) so the student sees the same context as the teacher at generation
-    # time.  Fall back to reconstructing it from raw fields for old JSONL files.
-    user_content = row.get("prompt") or _format_teacher_prompt(
+    # User content: always construct the student prompt from scratch so the
+    # student doesn't see the teacher's gold-answer-infused rationalization prompt.
+    user_content = _format_student_prompt(
         _fit_question(row["question"], final_answer, tokenizer, max_question_tokens),
         row.get("language", "en"),
     )
@@ -328,9 +332,8 @@ def tokenize_with_kd(
 
     if teacher_ids:
         # ── Direct-alignment path (same-family KD) ────────────────────────────
-        # Reconstruct the exact prompt string the teacher saw, then encode only
-        # that prefix so we can splice in the teacher's own token IDs verbatim.
-        user_content = row.get("prompt") or _format_teacher_prompt(
+        # Reconstruct the exact prompt string the student should see.
+        user_content = _format_student_prompt(
             row["question"], row.get("language", "en")
         )
         prompt_text = tokenizer.apply_chat_template(

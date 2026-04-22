@@ -28,8 +28,9 @@ DEFAULT_BATCH_SIZE        = 32     # teacher inference batch size
 DEFAULT_MAX_NEW_TOKENS    = 1024   # per-question token budget (hard cap: 2048)
 DEFAULT_TEMPERATURE       = 0.0    # 0.0 = greedy / deterministic
 DEFAULT_TOP_P             = 1.0
-DEFAULT_MAX_RETRIES       = 2      # re-query attempts for unparsed outputs
-DEFAULT_RETRY_TEMPERATURE = 0.4    # temperature injected for retry diversity
+DEFAULT_MAX_RETRIES              = 0   # disabled to enforce 10k limit
+DEFAULT_RETRY_TEMPERATURE        = 0.4
+DEFAULT_REJECTION_SAMPLING_RETRIES = 0   # disabled to enforce 10k limit
 DEFAULT_GPU_MEM_UTIL      = 0.6    # vLLM GPU memory fraction (lower if OOM)
 DEFAULT_TENSOR_PARALLEL   = 1      # set > 1 for multi-GPU tensor parallelism
 DEFAULT_SEED              = 42
@@ -64,7 +65,7 @@ LANGUAGE_NAMES = {
     "tamil":   "Tamil",
 }
 
-ANSWER_RE = re.compile(r"####\s*ANSWER\s*:\s*([A-J])", re.IGNORECASE)
+ANSWER_RE = re.compile(r"####\s*ANSWER\s*:\s*\(?([A-J])\)?", re.IGNORECASE)
 REASONING_BLOCK_RE = re.compile(
     r"<reasoning>(.*?)</reasoning>",
     re.IGNORECASE | re.DOTALL,
@@ -244,19 +245,24 @@ def sample_datasets(
     return concatenate_datasets(sampled_datasets).shuffle(seed=seed)
 
 
-def format_teacher_prompt(instruction: str, language: str) -> str:
-    """Build a language-aware prompt that enforces reasoning and final answer."""
-    canonical = MMLUPro._canonical_language(language)
-    language_name = LANGUAGE_NAMES.get(canonical, canonical.title())
+def format_teacher_prompt(instruction: str, gold_answer: str, language: str) -> str:
+    """Build a prompt that enforces structured output format with rationalization."""
+    lang_instruction = (
+        "1. Identify the core concept or formula needed to solve this question."
+        if language in ("en", "english") else
+        "1. First, translate the question to English. Then, identify the core concept needed."
+    )
+    
     return (
-        "You are creating multilingual knowledge-distillation training data.\n"
-        "Solve the following multiple-choice question carefully.\n\n"
+        "You are an expert multilingual reasoning assistant.\n"
+        f"The correct answer to the following question is '{gold_answer}'. "
+        "Your task is to provide the step-by-step reasoning that leads to this correct answer.\n\n"
         "Output rules:\n"
-        f"1. Write the full reasoning only in {language_name}.\n"
-        "2. Put all reasoning inside <reasoning> and </reasoning> tags.\n"
-        "3. After the reasoning block, write exactly one final line in the format "
-        "'#### ANSWER: [LETTER]'.\n"
-        "4. The final answer letter must be one of A-J.\n"
+        f"{lang_instruction}\n"
+        "2. Write all your reasoning and analysis entirely in English.\n"
+        "3. Put all reasoning inside <reasoning> and </reasoning> tags.\n"
+        "4. After the reasoning block, write exactly one final line in the format "
+        "'#### ANSWER: (LETTER)'.\n"
         "5. Do not output anything after the final answer line.\n\n"
         "Question:\n"
         f"{instruction}"
@@ -339,10 +345,6 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--max_new_tokens", type=int, default=None)
     parser.add_argument("--temperature", type=float, default=None)
     parser.add_argument("--top_p", type=float, default=None)
-    parser.add_argument("--max_retries", type=int, default=None)
-    parser.add_argument("--retry_temperature", type=float, default=None)
-    parser.add_argument("--gpu_memory_utilization", type=float, default=None)
-    parser.add_argument("--tensor_parallel_size", type=int, default=None)
     parser.add_argument("--seed", type=int, default=None)
     # store_true with default=None: not passed → None (use constant); passed → True
     parser.add_argument("--filter_incorrect", action="store_true", default=None)
@@ -350,6 +352,10 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--top_k_logits", type=int, default=None,
                         help="Save top-K logprobs per token for soft-label KD "
                              f"(0 = disabled, default: {DEFAULT_TOP_K_LOGITS})")
+    parser.add_argument("--gpu_memory_utilization", type=float, default=None,
+                        help=f"vLLM GPU memory fraction (default: {DEFAULT_GPU_MEM_UTIL})")
+    parser.add_argument("--tensor_parallel_size", type=int, default=None,
+                        help=f"vLLM tensor parallel size (default: {DEFAULT_TENSOR_PARALLEL})")
 
     # ── non-hyperparameter flags ──
     parser.add_argument("--split", default="test")
@@ -388,63 +394,7 @@ def _resolve_arg(value, default):
     return default if value is None else value
 
 
-def _retry_unparsed(
-        teacher,
-        tokenizer,
-        parsed_batch: list[dict[str, str]],
-        prompts: list[str],
-        *,
-        max_new_tokens: int,
-        retry_temperature: float,
-        top_p: float,
-        max_retries: int,
-        top_k_logits: int = 0,
-        batch_logprobs: list | None = None,
-        batch_token_ids: list | None = None,
-) -> list[dict[str, str]]:
-    """Re-query teacher for any outputs where the answer could not be parsed.
 
-    When top_k_logits > 0 and batch_logprobs is provided, the retry uses
-    generate_and_parse_batch_with_logprobs and updates batch_logprobs in-place
-    so logit arrays stay aligned with their corresponding text outputs.
-    """
-    for attempt in range(max_retries):
-        failed = [i for i, p in enumerate(parsed_batch) if not p["final_answer"]]
-        if not failed:
-            break
-        LOGGER.debug(
-            "Retry %d/%d: re-querying %d unparsed outputs",
-            attempt + 1, max_retries, len(failed),
-        )
-        if top_k_logits > 0 and batch_logprobs is not None:
-            retry_results, retry_logprobs, retry_token_ids = generate_and_parse_batch_with_logprobs(
-                teacher,
-                tokenizer,
-                [prompts[i] for i in failed],
-                max_new_tokens=max_new_tokens,
-                temperature=retry_temperature,
-                top_p=top_p,
-                top_k=top_k_logits,
-            )
-            for i, result, lp, tid in zip(failed, retry_results, retry_logprobs, retry_token_ids):
-                if result["final_answer"]:
-                    parsed_batch[i] = result
-                    batch_logprobs[i] = lp
-                    if batch_token_ids is not None:
-                        batch_token_ids[i] = tid
-        else:
-            retry_results = generate_and_parse_batch(
-                teacher,
-                tokenizer,
-                [prompts[i] for i in failed],
-                max_new_tokens=max_new_tokens,
-                temperature=retry_temperature,
-                top_p=top_p,
-            )
-            for i, result in zip(failed, retry_results):
-                if result["final_answer"]:
-                    parsed_batch[i] = result
-    return parsed_batch
 
 
 def main() -> None:
@@ -457,16 +407,8 @@ def main() -> None:
     max_new_tokens = _resolve_arg(args.max_new_tokens, DEFAULT_MAX_NEW_TOKENS)
     temperature = _resolve_arg(args.temperature, DEFAULT_TEMPERATURE)
     top_p = _resolve_arg(args.top_p, DEFAULT_TOP_P)
-    max_retries = _resolve_arg(args.max_retries, DEFAULT_MAX_RETRIES)
-    retry_temperature = _resolve_arg(
-        args.retry_temperature, DEFAULT_RETRY_TEMPERATURE
-    )
-    gpu_mem_util = _resolve_arg(
-        args.gpu_memory_utilization, DEFAULT_GPU_MEM_UTIL
-    )
-    tensor_parallel = _resolve_arg(
-        args.tensor_parallel_size, DEFAULT_TENSOR_PARALLEL
-    )
+    gpu_mem_util = _resolve_arg(args.gpu_memory_utilization, DEFAULT_GPU_MEM_UTIL)
+    tensor_parallel = _resolve_arg(args.tensor_parallel_size, DEFAULT_TENSOR_PARALLEL)
     seed = _resolve_arg(args.seed, DEFAULT_SEED)
     filter_incorrect = _resolve_arg(
         args.filter_incorrect, DEFAULT_FILTER_INCORRECT
@@ -512,8 +454,9 @@ def main() -> None:
             for row in batch_rows:
                 question_with_choices = _build_instruction(row)
                 questions_with_choices.append(question_with_choices)
+                gold_answer = str(row.get("answer", "")).upper()[:1]
                 prompts.append(
-                    format_teacher_prompt(question_with_choices, row["language"])
+                    format_teacher_prompt(question_with_choices, gold_answer, row["language"])
                 )
 
             if top_k_logits > 0:
@@ -538,19 +481,7 @@ def main() -> None:
                 batch_logprobs = [None] * len(parsed_batch)
                 batch_token_ids = [None] * len(parsed_batch)
 
-            parsed_batch = _retry_unparsed(
-                teacher,
-                tokenizer,
-                parsed_batch,
-                prompts,
-                max_new_tokens=max_new_tokens,
-                retry_temperature=retry_temperature,
-                top_p=top_p,
-                max_retries=max_retries,
-                top_k_logits=top_k_logits,
-                batch_logprobs=batch_logprobs,
-                batch_token_ids=batch_token_ids,
-            )
+
 
             for row, question_with_choices, prompt, parsed, token_logprobs, token_ids in zip(
                 batch_rows, questions_with_choices, prompts, parsed_batch, batch_logprobs, batch_token_ids

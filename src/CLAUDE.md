@@ -1,5 +1,8 @@
 # CLAUDE.md
 
+> **IMPORTANT**: All hard constraints from the assignment PDF are documented in [`../constraints.md`](../constraints.md).
+> Read that file before making any changes to generation counts, model names, library imports, or output formats.
+
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
 ## Project Overview
