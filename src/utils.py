@@ -50,6 +50,8 @@ def prompt_vllm(
     max_new_tokens: int = 16,
     temperature: float = 0.0,
     top_p: float = 1.0,
+    repetition_penalty: float = 1.05,
+    stop: list[str] | None = None,
     use_tqdm: bool = True,
 ):
     prompts = [build_vllm_prompt(tokenizer, messages) for messages in batch_messages]
@@ -57,6 +59,9 @@ def prompt_vllm(
         temperature=temperature,
         top_p=top_p,
         max_tokens=max_new_tokens,
+        repetition_penalty=repetition_penalty,
+        stop=stop or [],
+        include_stop_str_in_output=True,
     )
     outputs = llm.generate(prompts, sampling_params, use_tqdm=use_tqdm)
     return [output.outputs[0].text if output.outputs else '' for output in outputs]
@@ -70,6 +75,7 @@ def prompt_vllm_with_logprobs(
     max_new_tokens: int = 16,
     temperature: float = 0.0,
     top_p: float = 1.0,
+    repetition_penalty: float = 1.05,
     use_tqdm: bool = True,
 ):
     """Like prompt_vllm but also returns top-K log-probs per generated token.
@@ -86,6 +92,7 @@ def prompt_vllm_with_logprobs(
         top_p=top_p,
         max_tokens=max_new_tokens,
         logprobs=top_k,
+        repetition_penalty=repetition_penalty,
     )
     outputs = llm.generate(prompts, sampling_params, use_tqdm=use_tqdm)
 

@@ -58,8 +58,9 @@ def _format_student_prompt(instruction: str, language: str = "") -> str:
         "2. Write all your reasoning and analysis entirely in English.\n"
         "3. Put all reasoning inside <reasoning> and </reasoning> tags.\n"
         "4. After the reasoning block, write exactly one final line in the format "
-        "'#### ANSWER: (LETTER)'.\n"
-        "5. Do not output anything after the final answer line.\n\n"
+        "'#### ANSWER: (LETTER)' where LETTER is a single capital letter A–J. "
+        "Do not write anything else on that line or after it.\n"
+        "5. Stop immediately after writing the answer line.\n\n"
         "Question:\n"
         f"{instruction}"
     )
@@ -215,7 +216,9 @@ def _fit_question(question: str, final_answer: str, tokenizer, max_tokens: int) 
     stem_budget = max_tokens - len(tokenizer.encode("\n\n" + options_text, add_special_tokens=False))
     stem_ids = tokenizer.encode(stem, add_special_tokens=False)
     if len(stem_ids) > stem_budget:
-        stem = tokenizer.decode(stem_ids[:stem_budget], skip_special_tokens=True)
+        # Tail-truncate: MMLU-Pro puts the actual question sentence at the end of
+        # the stem; keeping the tail preserves it at the cost of background context.
+        stem = tokenizer.decode(stem_ids[-stem_budget:], skip_special_tokens=True)
 
     return f"{stem}\n\n{options_text}"
 

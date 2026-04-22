@@ -33,7 +33,7 @@ GENERATION_SYSTEM_MESSAGE = (
 )
 
 # Answer extraction: strict tag first, then last-resort scan
-ANSWER_TAG_RE = re.compile(r"####\s*ANSWER\s*:\s*\(?([A-J])\)?", re.IGNORECASE)
+ANSWER_TAG_RE = re.compile(r"####\s*ANSWER\s*:\s*\(([A-J])\)", re.IGNORECASE)
 FREEFORM_RE   = re.compile(
     r"(?:final\s+answer|answer|option)\s*[:\-]?\s*\(?([A-J])\)?",
     re.IGNORECASE,
@@ -140,8 +140,9 @@ def _format_student_prompt(instruction: str, language: str = "") -> str:
         "2. Write all your reasoning and analysis entirely in English.\n"
         "3. Put all reasoning inside <reasoning> and </reasoning> tags.\n"
         "4. After the reasoning block, write exactly one final line in the format "
-        "'#### ANSWER: (LETTER)'.\n"
-        "5. Do not output anything after the final answer line.\n\n"
+        "'#### ANSWER: (LETTER)' where LETTER is a single capital letter A–J. "
+        "Do not write anything else on that line or after it.\n"
+        "5. Stop immediately after writing the answer line.\n\n"
         "Question:\n"
         f"{instruction}"
     )
@@ -254,6 +255,7 @@ def main() -> None:
             batch_messages=batch_msgs,
             max_new_tokens=args.max_new_tokens,
             temperature=args.temperature,
+            stop=[s for l in "ABCDEFGHIJ" for s in (f"#### ANSWER: ({l})\n", f"#### ANSWER: ({l})")],
             use_tqdm=False,
         )
         for row, gen in zip(batch_rows, generations):
