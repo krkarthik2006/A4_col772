@@ -220,7 +220,7 @@ def _fit_question(question: str, final_answer: str, tokenizer, max_tokens: int) 
     return f"{stem}\n\n{options_text}"
 
 
-def build_training_text(row: dict, tokenizer, max_question_tokens: int = 1200) -> str:
+def build_training_text(row: dict, tokenizer, max_question_tokens: int = 700) -> str:
     """
     Construct a full chat-templated string for one training example.
 
@@ -258,9 +258,17 @@ def build_training_text(row: dict, tokenizer, max_question_tokens: int = 1200) -
         {"role": "user",      "content": user_content},
         {"role": "assistant", "content": assistant_content},
     ]
-    return tokenizer.apply_chat_template(
+    text = tokenizer.apply_chat_template(
         messages, tokenize=False, add_generation_prompt=False
     )
+    # LLaMA-3's chat template already embeds <|begin_of_text|> in the returned
+    # string. If the SFTTrainer tokenizer then tokenizes with add_special_tokens=True
+    # (the default), it prepends another BOS, producing a double BOS. Strip the
+    # leading BOS from the template output so the tokenizer adds exactly one.
+    bos = tokenizer.bos_token
+    if bos and text.startswith(bos):
+        text = text[len(bos):]
+    return text
 
 
 def prepare_dataset(
@@ -271,8 +279,9 @@ def prepare_dataset(
 ) -> Dataset:
     """Load and format JSONL into a HuggingFace Dataset with a single 'text' column."""
     rows = load_training_rows(data_path, filter_correct_only=filter_correct_only)
-    # Reserve 848 for response + 250 for system message and format instructions.
-    max_question_tokens = max_length - 848 - 250
+    # Reserve 1024 for teacher response (matches DEFAULT_MAX_NEW_TOKENS) +
+    # 300 for system message, format instructions, and chat template overhead.
+    max_question_tokens = max_length - 1024 - 300
     texts = [build_training_text(r, tokenizer, max_question_tokens=max_question_tokens) for r in rows]
     return Dataset.from_dict({"text": texts})
 
@@ -610,6 +619,13 @@ def main() -> None:
 
     train_dataset: Dataset
     eval_dataset: Optional[Dataset] = None
+
+    if args.top_k_logits > 0 and model_family == "llama":
+        LOGGER.warning(
+            "top_k_logits KD is invalid for cross-family distillation (LLaMA student, "
+            "Qwen teacher vocabularies differ). Falling back to SFT-only path."
+        )
+        args.top_k_logits = 0
 
     if args.top_k_logits > 0:
         # ── Soft-label KD path ────────────────────────────────────────────────
