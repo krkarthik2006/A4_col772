@@ -26,8 +26,8 @@ DEFAULT_NUM_SAMPLES = "2000,2000,2000,2000,2000"
 
 DEFAULT_BATCH_SIZE        = 32     # teacher inference batch size
 DEFAULT_MAX_NEW_TOKENS    = 1024   # per-question token budget (hard cap: 2048)
-DEFAULT_TEMPERATURE       = 0.0    # 0.0 = greedy / deterministic
-DEFAULT_TOP_P             = 1.0
+DEFAULT_TEMPERATURE       = 0.2
+DEFAULT_TOP_P             = 0.9
 DEFAULT_MAX_RETRIES              = 0   # disabled to enforce 10k limit
 DEFAULT_RETRY_TEMPERATURE        = 0.4
 DEFAULT_REJECTION_SAMPLING_RETRIES = 0   # disabled to enforce 10k limit

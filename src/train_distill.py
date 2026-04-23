@@ -223,7 +223,7 @@ def _fit_question(question: str, final_answer: str, tokenizer, max_tokens: int) 
     return f"{stem}\n\n{options_text}"
 
 
-def build_training_text(row: dict, tokenizer, max_question_tokens: int = 700) -> str:
+def build_training_text(row: dict, tokenizer, max_question_tokens: int = 1200) -> str:
     """
     Construct a full chat-templated string for one training example.
 
@@ -282,9 +282,8 @@ def prepare_dataset(
 ) -> Dataset:
     """Load and format JSONL into a HuggingFace Dataset with a single 'text' column."""
     rows = load_training_rows(data_path, filter_correct_only=filter_correct_only)
-    # Reserve 1024 for teacher response (matches DEFAULT_MAX_NEW_TOKENS) +
-    # 300 for system message, format instructions, and chat template overhead.
-    max_question_tokens = max_length - 1024 - 300
+    # Reserve 848 for response + 250 for system message and format instructions.
+    max_question_tokens = max_length - 848 - 250
     texts = [build_training_text(r, tokenizer, max_question_tokens=max_question_tokens) for r in rows]
     return Dataset.from_dict({"text": texts})
 

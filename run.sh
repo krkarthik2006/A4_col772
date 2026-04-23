@@ -53,8 +53,7 @@ run_step \
   python3 src/dataset_generation.py \
     --teacher_model /models/Qwen2.5-7B-Instruct \
     --output_file outputs/train.jsonl \
-    --top_k_logits 10 \
-    --num_samples 1400,2200,2200,2200,2000
+    --top_k_logits 10 
 
 # ── Val set creation ────────────────────────────────────────────────────────
 echo "[Val]   Creating held-out validation set..."
