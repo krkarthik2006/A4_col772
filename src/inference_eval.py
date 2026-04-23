@@ -33,7 +33,7 @@ GENERATION_SYSTEM_MESSAGE = (
 )
 
 # Answer extraction: strict tag first, then last-resort scan
-ANSWER_TAG_RE = re.compile(r"####\s*ANSWER\s*:\s*\(([A-J])\)", re.IGNORECASE)
+ANSWER_TAG_RE = re.compile(r"####\s*ANSWER\s*:\s*\(?([A-J])\)?", re.IGNORECASE)
 FREEFORM_RE   = re.compile(
     r"(?:final\s+answer|answer|option)\s*[:\-]?\s*\(?([A-J])\)?",
     re.IGNORECASE,
