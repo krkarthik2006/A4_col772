@@ -54,7 +54,7 @@ run_step \
     --teacher_model /models/Qwen2.5-7B-Instruct \
     --output_file outputs/train.jsonl \
     --top_k_logits 10 \
-    --num_samples 1600,2000,2000,2200,2200
+    --num_samples 1400,2200,2200,2200,2000
 
 # ── Val set creation ────────────────────────────────────────────────────────
 echo "[Val]   Creating held-out validation set..."
