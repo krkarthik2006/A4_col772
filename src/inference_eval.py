@@ -100,16 +100,16 @@ def canonical_language(lang: str) -> str:
 def extract_answer(text: str) -> str:
     """
     3-step defensive extraction of the answer letter (A–J).
-    1. Strict: #### ANSWER: (X)
+    1. Strict: #### ANSWER: (X)  — last occurrence wins (CoT may write tentative answers mid-reasoning)
     2. Loose:  "final answer: X" / "answer: X"
     3. Scan:   last non-empty line for a lone letter
     """
-    m = ANSWER_TAG_RE.search(text)
-    if m:
-        return m.group(1).upper()
+    all_matches = ANSWER_TAG_RE.findall(text)
+    if all_matches:
+        return all_matches[-1].upper()
 
-    # Search in the last 400 characters to avoid false positives from reasoning
-    tail = text[-400:]
+    # Search in the last 800 characters to avoid false positives from reasoning
+    tail = text[-800:]
     m = FREEFORM_RE.search(tail)
     if m:
         return m.group(1).upper()

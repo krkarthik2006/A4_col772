@@ -50,7 +50,7 @@ def prompt_vllm(
     max_new_tokens: int = 16,
     temperature: float = 0.0,
     top_p: float = 1.0,
-    repetition_penalty: float = 1.05,
+    repetition_penalty: float = 1.0,
     stop: list[str] | None = None,
     use_tqdm: bool = True,
 ):
@@ -75,7 +75,7 @@ def prompt_vllm_with_logprobs(
     max_new_tokens: int = 16,
     temperature: float = 0.0,
     top_p: float = 1.0,
-    repetition_penalty: float = 1.05,
+    repetition_penalty: float = 1.0,
     use_tqdm: bool = True,
 ):
     """Like prompt_vllm but also returns top-K log-probs per generated token.
