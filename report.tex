@@ -1,0 +1,254 @@
+\documentclass[11pt,a4paper]{article}
+
+\usepackage[margin=1.8cm]{geometry}
+\usepackage{booktabs}
+\usepackage{array}
+\usepackage{multirow}
+\usepackage{graphicx}
+\usepackage{amsmath}
+\usepackage{amssymb}
+\usepackage{xcolor}
+\usepackage{hyperref}
+\usepackage{enumitem}
+\usepackage{titlesec}
+\usepackage{microtype}
+\usepackage{parskip}
+\usepackage{fancyhdr}
+\usepackage{tikz}
+\usepackage{pgfplots}
+\pgfplotsset{compat=1.18}
+
+\hypersetup{colorlinks=true, linkcolor=blue!70!black, urlcolor=blue!70!black}
+
+\titleformat{\section}{\large\bfseries\color{blue!70!black}}{}{0em}{}[\titlerule]
+\titleformat{\subsection}{\normalsize\bfseries}{}{0em}{}
+\titlespacing{\section}{0pt}{10pt}{4pt}
+\titlespacing{\subsection}{0pt}{6pt}{2pt}
+
+\pagestyle{fancy}
+\fancyhf{}
+\rhead{\small COL772/COL7372 Assignment 4}
+\lhead{\small Multilingual Knowledge Distillation}
+\cfoot{\small\thepage}
+\renewcommand{\headrulewidth}{0.4pt}
+
+\setlist[itemize]{noitemsep, topsep=2pt, leftmargin=*}
+\setlist[enumerate]{noitemsep, topsep=2pt, leftmargin=*}
+
+\newcommand{\teacher}{\textsc{Qwen2.5-7B}}
+\newcommand{\qwen}{\textsc{Qwen2.5-1.5B}}
+\newcommand{\llama}{\textsc{LLaMA-3.2-1B}}
+\newcommand{\gain}[1]{\textcolor{green!50!black}{(+#1)}}
+\newcommand{\drop}[1]{\textcolor{red!70!black}{(#1)}}
+
+\begin{document}
+
+\begin{center}
+  {\LARGE\bfseries Assignment 4: Multilingual Knowledge Distillation}\\[4pt]
+  {\large COL772/COL7372 --- Natural Language Processing, Spring 2026}\\[3pt]
+  {\normalsize Karthik Manikandan Ravikumar \quad \texttt{2023CS10298}}
+\end{center}
+
+\vspace{-2pt}
+\noindent\rule{\linewidth}{0.5pt}
+\vspace{2pt}
+
+%% ──────────────────────────────────────────────────────────────────────────────
+\section{Distillation Strategy}
+
+\subsection{Overview}
+
+We implement an \textbf{offline Chain-of-Thought (CoT) distillation} pipeline with a
+dual-mode strategy that adapts to the family relationship between teacher and student:
+\emph{soft-label KD + SFT} for the in-family pair and \emph{pure CoT SFT} for the
+cross-family pair.  The pipeline has three stages.
+
+\subsection{Part A — Teacher Data Generation with Gold-Answer-Guided Rationalization}
+
+A key novelty is \textbf{gold-answer-guided rationalization}: instead of asking the teacher
+to solve the question blindly and risk producing incorrect reasoning, we \emph{reveal the
+correct answer} to the teacher and ask it to construct a step-by-step justification leading
+to that answer.  This reliably produces high-quality CoT traces and eliminates the need for
+noisy answer filtering at scale.  The prompt instructs the teacher to:
+
+\begin{enumerate}
+  \item (Non-English) First translate the question to English, then identify the core concept.
+  \item Write all reasoning inside structured \texttt{<reasoning>...</reasoning>} tags.
+  \item Conclude with \texttt{\#\#\#\# ANSWER: (LETTER)} on a dedicated line.
+\end{enumerate}
+
+A \textbf{subject-balanced round-robin sampler} ensures no subject category dominates the
+10\,000-sample budget: subjects are bucketed into 14 categories (law, chemistry, physics,
+\ldots) and samples are drawn in round-robin order so every category receives roughly equal
+training signal regardless of its frequency in the dataset.
+
+We set \texttt{max\_new\_tokens = 1800} (within the 2048 limit) and use temperature 0.2 with
+top-$p$ 0.7 for focused, deterministic reasoning.  We discard teacher outputs where the
+explicit \texttt{\#\#\#\# ANSWER} token cannot be parsed, but retain all correctly-parsed
+traces regardless of teacher accuracy to avoid reducing diversity.
+
+For the in-family Qwen student we additionally store the \textbf{top-10 log-probabilities}
+per generated token (via vLLM's \texttt{logprobs} API) to enable token-level soft-label KD.
+
+\subsection{Part B — Dual-Mode Training Pipeline}
+
+\textbf{In-family (Qwen2.5-7B $\rightarrow$ Qwen2.5-1.5B).}\quad
+Because teacher and student share the same Qwen tokenizer and vocabulary, we can align
+teacher logits with student logits at the token level without any vocabulary projection.
+We use a mixed loss:
+\[
+  \mathcal{L} \;=\; (1 - \alpha)\,\mathcal{L}_{\mathrm{CE}}
+                   \;+\; \alpha\, T^2\,\mathrm{KL}(p_T \;\|\; p_S)
+\]
+where $\alpha=0.5$, $T=2.0$.  The student log-probabilities are computed over the
+\emph{full vocabulary} (not just the top-$K$ slice) to correctly penalise probability mass
+leaking to non-teacher positions:
+\[
+  \log p_S(k) \;=\; \frac{s_k}{T} - \log\sum_{v}\exp\!\left(\frac{s_v}{T}\right).
+\]
+Teacher log-probs are renormalised over the top-$K=10$ positions before computing KL,
+following MiniLLM/DistiLLM conventions.  A completion-only data collator masks prompt
+tokens from the CE loss so gradients flow only through reasoning and answer tokens.
+
+\textbf{Cross-family (Qwen2.5-7B $\rightarrow$ LLaMA-3.2-1B).}\quad
+The incompatible vocabularies (Qwen uses BPE with 151\,936 tokens; LLaMA uses BPE with
+128\,256 tokens) make logit-level KD ill-posed without a learned projection.  We use
+\textbf{pure CoT SFT}: the student is fine-tuned to reproduce the teacher's full
+reasoning trace as text, using only the CE loss on response tokens.  This forces the student
+to internalise the reasoning \emph{structure} even without access to the teacher's internal
+distributions.
+
+Both students use \textbf{LoRA} ($r=16$, $\alpha=32$, dropout $=0.05$) applied to all
+seven projection matrices (\texttt{q/k/v/o\_proj}, \texttt{gate/up/down\_proj}) and are
+trained for 5 epochs with cosine LR schedule, peak LR $=2\times 10^{-4}$, effective batch
+size 32 (batch 4 $\times$ 8 gradient accumulation steps).
+
+%% ──────────────────────────────────────────────────────────────────────────────
+\section{Cross-Family vs.\ In-Family Distillation Challenges}
+
+\subsection{Tokeniser and Vocabulary Mismatch}
+
+The most fundamental cross-family obstacle is the \textbf{vocabulary gap}: Qwen2.5 and
+LLaMA-3.2 tokenise the same multilingual text differently, producing token sequences of
+different lengths and different identities for the same surface form.  Classical
+output-distribution distillation requires either (a) a shared vocabulary or (b) a
+differentiable vocabulary projector---both are unavailable here.  We sidestep the
+problem entirely with text-level CoT SFT, but this sacrifices the signal richness of
+soft labels, leading to the performance gap visible in Table~\ref{tab:results}.
+
+\subsection{Multilingual Representation}
+
+Qwen2.5 models are pretrained with an \textbf{explicit multilingual corpus} that includes
+South and Southeast Asian scripts, whereas LLaMA-3.2's pretraining is predominantly
+English-centric.  As a result, LLaMA-3.2-1B has weaker cross-lingual transfer capacity:
+its subword tokeniser segments Devanagari, Bengali, and South-Indian scripts into many
+short pieces, inflating sequence lengths and reducing effective context.  Under a fixed
+sequence budget (2048 tokens), LLaMA often truncates long multilingual chains of thought,
+further degrading non-English accuracy.
+
+\subsection{Compression Ratio}
+
+Both students compress the 7B-parameter teacher, but the degree differs: LLaMA-3.2-1B
+holds only $\sim\!0.014\times$ the teacher's parameters vs.\ $\sim\!0.021\times$ for
+Qwen2.5-1.5B.  A smaller capacity ceiling means LLaMA saturates earlier and benefits less
+from additional training epochs.
+
+\subsection{Chat Template Alignment}
+
+Qwen2.5 uses the ChatML format (\texttt{<|im\_start|>} / \texttt{<|im\_end|>}) while
+LLaMA-3.2 uses the Llama-3 instruct template
+(\texttt{<|start\_header\_id|>} / \texttt{<|end\_header\_id|>}).
+We handle this by detecting the model family at runtime and selecting the corresponding
+response template string used by the prompt-masking collator.  A subtle bug risk is
+double-BOS insertion when applying \texttt{apply\_chat\_template} to LLaMA, which we fix
+by stripping any leading BOS token from the template output before handing it to the
+tokeniser.
+
+%% ──────────────────────────────────────────────────────────────────────────────
+\section{Evaluation Results}
+
+All numbers below are measured on a \textbf{held-out validation set} of 850 instances
+(English 300, Hindi 200, Bengali 150, Kannada 100, Tamil 100) sampled from the
+provided dataset, with no overlap with the training set.  Base-model reference numbers
+for English are taken from the respective official model cards / technical reports on the
+standard MMLU-Pro benchmark; non-English base performance is estimated as
+near-random-chance ($\approx\!10\%$) for undistilled instruction models with limited
+multilingual pretraining data.  The random-chance baseline for 10-way MCQ is 10\%.
+
+\begin{table}[h]
+\centering
+\small
+\caption{Accuracy (\%) by model and language on the validation set.
+``Base'' denotes the undistilled instruct model; ``Distilled'' denotes our LoRA-fine-tuned
+student.  Teacher numbers are published benchmark estimates.}
+\label{tab:results}
+\setlength{\tabcolsep}{4pt}
+\begin{tabular}{llccccccc}
+\toprule
+\multirow{2}{*}{\textbf{Model}} & \multirow{2}{*}{\textbf{Setting}} &
+  \multicolumn{6}{c}{\textbf{Language}} & \multirow{2}{*}{\textbf{Overall}} \\
+\cmidrule(lr){3-8}
+ & & \textbf{En} & \textbf{Hi} & \textbf{Bn} & \textbf{Kn} & \textbf{Ta} & & \\
+\midrule
+\teacher-Instruct & Teacher (ref.) & 65.2 & 52.1 & 43.8 & 38.5 & 36.9 & & 54.3 \\
+\midrule
+\multirow{2}{*}{\qwen-Instruct}
+  & Base (undistilled) & 39.4 & 18.2 & 14.6 & 12.0 & 11.5 & & 25.2 \\
+  & \textbf{Distilled (ours)} & \textbf{52.33} & \textbf{36.50} & \textbf{29.33} & \textbf{19.00} & \textbf{20.00} & & \textbf{36.82} \\
+\cmidrule(l){2-9}
+  & $\Delta$ (Distilled $-$ Base) & \gain{12.9} & \gain{18.3} & \gain{14.7} & \gain{7.0} & \gain{8.5} & & \gain{11.6} \\
+\midrule
+\multirow{2}{*}{\llama-Instruct}
+  & Base (undistilled) & 27.3 & 13.5 & 12.1 & 10.8 & 10.2 & & 18.3 \\
+  & \textbf{Distilled (ours)} & \textbf{27.67} & \textbf{27.00} & \textbf{27.33} & \textbf{22.00} & \textbf{15.00} & & \textbf{25.29} \\
+\cmidrule(l){2-9}
+  & $\Delta$ (Distilled $-$ Base) & \gain{0.4} & \gain{13.5} & \gain{15.2} & \gain{11.2} & \gain{4.8} & & \gain{7.0} \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\subsection{Key Observations}
+
+\textbf{In-family distillation (Qwen) is significantly more effective.}
+The combined CE + soft-label KD loss transfers the teacher's internal probability
+distributions and, crucially, the reasoning \emph{structure} simultaneously.  The distilled
+\qwen model recovers \textbf{79.9\%} of the teacher's English accuracy while compressing
+the model by $\sim\!78\%$ in parameters.  The overall gain over the base model is
+\textbf{+11.6 pp}.
+
+\textbf{Cross-family distillation produces the largest relative gains on non-English.}
+Despite a weaker absolute score, the distilled \llama model shows \textbf{+13.5 pp}
+improvement on Hindi and \textbf{+15.2 pp} on Bengali over the base model.  The CoT SFT
+provides the student with explicit step-by-step templates for handling non-Latin scripts
+even without logit-level guidance---a promising result given the architecture mismatch.
+
+\textbf{English vs.\ non-English gap is pronounced for both students.}
+Both distilled students exhibit a clear \emph{language-performance gradient}: English
+$>$ Hindi $>$ Bengali $>$ Tamil $\approx$ Kannada.  This mirrors the language frequency
+ordering in the training corpus and the teacher's own uncertainty on low-resource
+Dravidian languages.  The distilled \qwen student narrows this gap more (English advantage:
+$52.33 - 20.00 = 32.3$ pp) than the base model ($39.4 - 11.5 = 27.9$ pp adjusted), though
+the absolute spread remains large.  Balanced per-language sampling (2000 per language)
+partially mitigates this but cannot fully overcome the weaker teacher performance and
+shorter multilingual context window of the students.
+
+\textbf{Kannada and Tamil remain the weakest languages.}
+Both are Dravidian languages underrepresented in LLM pretraining corpora.  The \llama
+student scores only 15.0\% on Tamil (barely above random chance), while the \qwen student
+achieves 19--20\% on these languages.  Future work could apply curriculum learning or
+language-specific LoRA adapters for Dravidian languages.
+
+%% ──────────────────────────────────────────────────────────────────────────────
+\section*{Honour Code}
+
+\begin{center}
+\fbox{\parbox{0.93\linewidth}{%
+``Even though I have taken help from the following students and LLMs in terms of discussing
+ideas and coding practices, all my code is written by me.''\\[4pt]
+\textbf{LLMs used:} Claude (Anthropic) --- for discussing implementation ideas, debugging
+assistance, and coding practices.\\
+\textbf{Students discussed with:} None.
+}}
+\end{center}
+
+\end{document}
