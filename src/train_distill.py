@@ -82,23 +82,18 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--teacher_model", required=False,
                         help="HuggingFace model ID or path to the teacher model "
                              "(reserved for online distillation; unused in offline mode)")
-    parser.add_argument("--train_data", default="data/train.jsonl",
+    parser.add_argument("--train_data", default="outputs/train.jsonl",
                         help="Path to training JSONL produced by dataset_generation.py")
     parser.add_argument("--output_dir", required=True,
                         help="Directory to save LoRA adapter (and optionally merged model)")
 
     parser.add_argument("--batch_size", type=int, default=4)
-    parser.add_argument("--epochs", type=int, default=3)
+    parser.add_argument("--epochs", type=int, default=5)
     parser.add_argument("--lr", type=float, default=2e-4)
     parser.add_argument("--max_length", type=int, default=2048)
-    parser.add_argument(
-        "--mask_prompt_tokens",
-        action="store_true",
-        help="Mask question tokens so loss is computed only on reasoning + answer",
-    )
 
-    parser.add_argument("--lora_r", type=int, default=16)
-    parser.add_argument("--lora_alpha", type=int, default=32)
+    parser.add_argument("--lora_r", type=int, default=32)
+    parser.add_argument("--lora_alpha", type=int, default=64)
     parser.add_argument("--lora_dropout", type=float, default=0.05)
     parser.add_argument("--use_qlora", action="store_true",
                         help="Load base model in 4-bit (NF4) for QLoRA training")
@@ -114,12 +109,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--val_data", default="",
                         help="Optional path to validation JSONL for eval during training")
 
-    parser.add_argument("--top_k_logits", type=int, default=0,
+    parser.add_argument("--top_k_logits", type=int, default=10,
                         help="Use top-K soft-label KD loss (0 = disabled). "
                              "Requires teacher_top_k_logits field in train_data.")
-    parser.add_argument("--kd_alpha", type=float, default=0.5,
+    parser.add_argument("--kd_alpha", type=float, default=0.7,
                         help="Weight of the KD loss: total = (1-alpha)*CE + alpha*T^2*KL")
-    parser.add_argument("--kd_temperature", type=float, default=1.0,
+    parser.add_argument("--kd_temperature", type=float, default=2.0,
                         help="Temperature T for teacher/student distribution sharpening")
 
     parser.add_argument(
@@ -586,18 +581,14 @@ def main() -> None:
             LOGGER.info("Validation examples: %d", len(eval_dataset))
         has_eval = eval_dataset is not None
 
-        collator = None
-        if args.mask_prompt_tokens:
-            collator = DataCollatorForCompletionOnlyLM(
-                response_template=resp_template_ids,
-                tokenizer=tokenizer,
-            )
-            LOGGER.info(
-                "Prompt masking ON - response template: %r (%d tokens)",
-                resp_template, len(resp_template_ids),
-            )
-        else:
-            LOGGER.info("Prompt masking OFF - loss computed on full sequence")
+        collator = DataCollatorForCompletionOnlyLM(
+            response_template=resp_template_ids,
+            tokenizer=tokenizer,
+        )
+        LOGGER.info(
+            "Prompt masking ON - response template: %r (%d tokens)",
+            resp_template, len(resp_template_ids),
+        )
 
         training_args = SFTConfig(
             **common_training_kwargs,

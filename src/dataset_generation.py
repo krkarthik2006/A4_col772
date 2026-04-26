@@ -30,7 +30,7 @@ DEFAULT_TENSOR_PARALLEL = 1
 DEFAULT_SEED = 42
 DEFAULT_FILTER_INCORRECT = True
 DEFAULT_SKIP_UNPARSED = True
-DEFAULT_TOP_K_LOGITS = 0
+DEFAULT_TOP_K_LOGITS = 10
 
 LOGGER = logging.getLogger(__name__)
 LANGUAGES = ["english", "hindi", "bengali", "kannada", "tamil"]

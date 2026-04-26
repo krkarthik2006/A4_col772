@@ -49,17 +49,13 @@ run_step \
   "done. saved to outputs/train.jsonl" \
   python3 src/dataset_generation.py \
     --teacher_model /models/Qwen2.5-7B-Instruct \
-    --output_file outputs/train.jsonl \
-    --top_k_logits 10
+    --output_file outputs/train.jsonl
 
 # carve out a small val set for monitoring training
 run_step \
   "Val" \
   "done. saved to outputs/val.jsonl" \
-  python3 src/make_val_set.py \
-    --train_data outputs/train.jsonl \
-    --output_file outputs/val.jsonl \
-    --num_samples 300,200,150,100,100
+  python3 src/make_val_set.py
 
 # part B: train qwen student (in-family, uses kd loss)
 run_step \
@@ -67,16 +63,8 @@ run_step \
   "qwen training done. adapter at outputs/qwen_lora" \
   python3 src/train_distill.py \
     --student_model /models/Qwen2.5-1.5B-Instruct \
-    --train_data outputs/train.jsonl \
-    --output_dir outputs/qwen_lora \
-    --batch_size 4 \
-    --gradient_accumulation_steps 8 \
-    --epochs 5 \
-    --lr 2e-4 \
-    --mask_prompt_tokens \
-    --top_k_logits 10 \
-    --kd_alpha 0.5 \
-    --kd_temperature 2.0
+    --teacher_model /models/Qwen2.5-7B-Instruct \
+    --output_dir outputs/qwen_lora
 
 # part B: train llama student (cross-family, sft only)
 run_step \
@@ -84,13 +72,8 @@ run_step \
   "llama training done. adapter at outputs/llama_lora" \
   python3 src/train_distill.py \
     --student_model /models/Llama-3.2-1B-Instruct \
-    --train_data outputs/train.jsonl \
-    --output_dir outputs/llama_lora \
-    --batch_size 4 \
-    --gradient_accumulation_steps 8 \
-    --epochs 5 \
-    --lr 2e-4 \
-    --mask_prompt_tokens
+    --teacher_model /models/Qwen2.5-7B-Instruct \
+    --output_dir outputs/llama_lora
 
 # part C: eval qwen
 run_step \
@@ -101,10 +84,7 @@ run_step \
     --adapter_path outputs/qwen_lora \
     --test_data outputs/val.jsonl \
     --output_predictions outputs/predictions_Qwen2.5-1.5B-Instruct.jsonl \
-    --report_file outputs/metrics_Qwen2.5-1.5B-Instruct.txt \
-    --max_new_tokens 2048 \
-    --batch_size 16 \
-    --gpu_memory_utilization 0.85
+    --report_file outputs/metrics_Qwen2.5-1.5B-Instruct.txt
 
 # part C: eval llama
 run_step \
@@ -115,10 +95,7 @@ run_step \
     --adapter_path outputs/llama_lora \
     --test_data outputs/val.jsonl \
     --output_predictions outputs/predictions_Llama-3.2-1B-Instruct.jsonl \
-    --report_file outputs/metrics_Llama-3.2-1B-Instruct.txt \
-    --max_new_tokens 2048 \
-    --batch_size 16 \
-    --gpu_memory_utilization 0.85
+    --report_file outputs/metrics_Llama-3.2-1B-Instruct.txt
 
 pipeline_end_ts=$(date +%s)
 pipeline_elapsed=$((pipeline_end_ts - pipeline_start_ts))
