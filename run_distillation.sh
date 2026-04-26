@@ -23,7 +23,7 @@ run_step() {
   start_ts=$(date +%s)
 
   echo ""
-  echo "[$label] Started at: $(date '+%Y-%m-%d %H:%M:%S %Z')"
+  echo "[$label] started at: $(date '+%Y-%m-%d %H:%M:%S %Z')"
 
   "$@"
 
@@ -31,8 +31,8 @@ run_step() {
   elapsed=$((end_ts - start_ts))
 
   echo "[$label] ${success_message}"
-  echo "[$label] Finished at: $(date '+%Y-%m-%d %H:%M:%S %Z')"
-  echo "[$label] Elapsed: $(format_duration "$elapsed")"
+  echo "[$label] finished at: $(date '+%Y-%m-%d %H:%M:%S %Z')"
+  echo "[$label] elapsed: $(format_duration "$elapsed")"
 }
 
 pipeline_start_ts=$(date +%s)
@@ -40,36 +40,31 @@ pipeline_start_ts=$(date +%s)
 cd /workspace
 mkdir -p outputs
 
-echo "======================================================"
-echo "  COL772 A4 — Multilingual Knowledge Distillation"
-echo "======================================================"
-echo "Pipeline started at: $(date '+%Y-%m-%d %H:%M:%S %Z')"
+echo "== COL772 A4 pipeline =="
+echo "started at: $(date '+%Y-%m-%d %H:%M:%S %Z')"
 
-# ── Part A: Dataset generation ─────────────────────────────────────────────
-echo "[Part A] Generating teacher distillation data..."
+# part A: generate teacher reasoning traces
 run_step \
   "Part A" \
-  "Done. Saved to outputs/train.jsonl" \
+  "done. saved to outputs/train.jsonl" \
   python3 src/dataset_generation.py \
     --teacher_model /models/Qwen2.5-7B-Instruct \
     --output_file outputs/train.jsonl \
-    --top_k_logits 10 
+    --top_k_logits 10
 
-# ── Val set creation ────────────────────────────────────────────────────────
-echo "[Val]   Creating held-out validation set..."
+# carve out a small val set for monitoring training
 run_step \
   "Val" \
-  "Done. Saved to outputs/val.jsonl" \
+  "done. saved to outputs/val.jsonl" \
   python3 src/make_val_set.py \
     --train_data outputs/train.jsonl \
     --output_file outputs/val.jsonl \
     --num_samples 300,200,150,100,100
 
-# ── Part B: Train Qwen student ──────────────────────────────────────────────
-echo "[Part B] Training in-family student: Qwen2.5-1.5B-Instruct..."
+# part B: train qwen student (in-family, uses kd loss)
 run_step \
   "Part B / Qwen" \
-  "Qwen training done. Adapter at outputs/qwen_lora" \
+  "qwen training done. adapter at outputs/qwen_lora" \
   python3 src/train_distill.py \
     --student_model /models/Qwen2.5-1.5B-Instruct \
     --train_data outputs/train.jsonl \
@@ -83,11 +78,10 @@ run_step \
     --kd_alpha 0.5 \
     --kd_temperature 2.0
 
-# ── Part B: Train LLaMA student ─────────────────────────────────────────────
-echo "[Part B] Training cross-family student: Llama-3.2-1B-Instruct..."
+# part B: train llama student (cross-family, sft only)
 run_step \
   "Part B / LLaMA" \
-  "LLaMA training done. Adapter at outputs/llama_lora" \
+  "llama training done. adapter at outputs/llama_lora" \
   python3 src/train_distill.py \
     --student_model /models/Llama-3.2-1B-Instruct \
     --train_data outputs/train.jsonl \
@@ -98,11 +92,10 @@ run_step \
     --lr 2e-4 \
     --mask_prompt_tokens
 
-# ── Part C: Evaluate Qwen student ───────────────────────────────────────────
-echo "[Part C] Inference + evaluation: Qwen2.5-1.5B-Instruct..."
+# part C: eval qwen
 run_step \
   "Part C / Qwen Eval" \
-  "Qwen eval done. Report at outputs/metrics_Qwen2.5-1.5B-Instruct.txt" \
+  "qwen eval done. report at outputs/metrics_Qwen2.5-1.5B-Instruct.txt" \
   python3 src/inference_eval.py \
     --base_model /models/Qwen2.5-1.5B-Instruct \
     --adapter_path outputs/qwen_lora \
@@ -113,11 +106,10 @@ run_step \
     --batch_size 16 \
     --gpu_memory_utilization 0.85
 
-# ── Part C: Evaluate LLaMA student ──────────────────────────────────────────
-echo "[Part C] Inference + evaluation: Llama-3.2-1B-Instruct..."
+# part C: eval llama
 run_step \
   "Part C / LLaMA Eval" \
-  "LLaMA eval done. Report at outputs/metrics_Llama-3.2-1B-Instruct.txt" \
+  "llama eval done. report at outputs/metrics_Llama-3.2-1B-Instruct.txt" \
   python3 src/inference_eval.py \
     --base_model /models/Llama-3.2-1B-Instruct \
     --adapter_path outputs/llama_lora \
@@ -132,8 +124,6 @@ pipeline_end_ts=$(date +%s)
 pipeline_elapsed=$((pipeline_end_ts - pipeline_start_ts))
 
 echo ""
-echo "======================================================"
-echo "  Pipeline complete!"
-echo "Pipeline finished at: $(date '+%Y-%m-%d %H:%M:%S %Z')"
-echo "Total elapsed: $(format_duration "$pipeline_elapsed")"
-echo "======================================================"
+echo "== pipeline done =="
+echo "finished at: $(date '+%Y-%m-%d %H:%M:%S %Z')"
+echo "total elapsed: $(format_duration "$pipeline_elapsed")"

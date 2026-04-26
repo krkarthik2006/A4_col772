@@ -15,39 +15,22 @@ from data.mmlupro import MMLUPro
 from utils import load_vllm_llm, prompt_vllm, prompt_vllm_with_logprobs
 
 
-# ── HYPERPARAMETERS ────────────────────────────────────────────────────────
-# Edit values here. CLI flags override these when explicitly passed.
-
-# Samples per language: english, hindi, bengali, kannada, tamil.
-# Equal split (2000 each) gives every language identical training signal.
-# Tamil has exactly 2000 rows available — raising any value above its
-# language cap will raise an error at runtime.
+# default values - cli args override these
 DEFAULT_NUM_SAMPLES = "2000,2000,2000,2000,2000"
 
-DEFAULT_BATCH_SIZE        = 32     # teacher inference batch size
-DEFAULT_MAX_NEW_TOKENS    = 1800  # per-question token budget (hard cap: 2048)
-DEFAULT_TEMPERATURE       = 0.2
-DEFAULT_TOP_P             = 0.7
-DEFAULT_MAX_RETRIES              = 0   # disabled to enforce 10k limit
-DEFAULT_RETRY_TEMPERATURE        = 0.4
-DEFAULT_REJECTION_SAMPLING_RETRIES = 0   # disabled to enforce 10k limit
-DEFAULT_GPU_MEM_UTIL      = 0.6    # vLLM GPU memory fraction (lower if OOM)
-DEFAULT_TENSOR_PARALLEL   = 1      # set > 1 for multi-GPU tensor parallelism
-DEFAULT_SEED              = 42
-
-# True  → discard rows where teacher answer ≠ gold (recommended)
-# False → keep them; teacher_correct flag remains set for post-hoc analysis
-DEFAULT_FILTER_INCORRECT  = True
-
-# True  → discard rows where no answer letter could be extracted after retries
-DEFAULT_SKIP_UNPARSED     = True
-
-# Number of top-K logprobs to save per generated token (0 = disabled).
-# When > 0 vLLM stores the top-K (token_id, log_prob) pairs alongside each row
-# so the student can be trained with soft-label KD instead of pure SFT.
-DEFAULT_TOP_K_LOGITS      = 0
-
-# ───────────────────────────────────────────────────────────────────────────
+DEFAULT_BATCH_SIZE = 32
+DEFAULT_MAX_NEW_TOKENS = 1800
+DEFAULT_TEMPERATURE = 0.2
+DEFAULT_TOP_P = 0.7
+DEFAULT_MAX_RETRIES = 0
+DEFAULT_RETRY_TEMPERATURE = 0.4
+DEFAULT_REJECTION_SAMPLING_RETRIES = 0
+DEFAULT_GPU_MEM_UTIL = 0.85
+DEFAULT_TENSOR_PARALLEL = 1
+DEFAULT_SEED = 42
+DEFAULT_FILTER_INCORRECT = True
+DEFAULT_SKIP_UNPARSED = True
+DEFAULT_TOP_K_LOGITS = 0
 
 LOGGER = logging.getLogger(__name__)
 LANGUAGES = ["english", "hindi", "bengali", "kannada", "tamil"]
@@ -56,7 +39,6 @@ GENERATION_SYSTEM_MESSAGE = (
     "the requested output format exactly."
 )
 
-# Human-readable names keyed by MMLUPro canonical codes ("en", "hindi", …)
 LANGUAGE_NAMES = {
     "en":      "English",
     "hindi":   "Hindi",
@@ -76,46 +58,21 @@ FREEFORM_ANSWER_RE = re.compile(
 )
 TAIL_LETTER_RE = re.compile(r"\b([A-J])\b", re.IGNORECASE)
 
-# Ordered (category, pattern) pairs derived from the actual subject strings in
-# data/dataset.jsonl. First match wins; unmatched rows fall into "other".
-#
-# Ordering rules that prevent false matches:
-#   • law before everything (professional_law = 17% of dataset)
-#   • business_econ before chemistry (avoid "chemical engineering" going to chem)
-#   • chemistry before physics (PhysicalChemistry must not go to physics)
-#   • computer_science before engineering (machine_learning before machine)
-#   • engineering before physics (FluidMechanics stays in engineering, not physics)
+# order matters: law first, business before chemistry, computer_science before engineering, etc.
+# to avoid false matches like "chemical engineering" going to chemistry
 SUBJECT_CATEGORY_PATTERNS: list[tuple[str, re.Pattern]] = [
-    # professional_law = 1 726 rows (~17 %); jurisprudence, international_law
     ("law",             re.compile(r"law|juris", re.I)),
-    # stemez-Business/Economics, macroeconomics, accounting, Finance, marketing,
-    # management, public_relations, econometrics
     ("business_econ",   re.compile(r"business|econom|financ|account|market|management|public_relat", re.I)),
-    # stemez-Chemistry/PhysicalChemistry/OrganicChemistry, scibench-atkins/chemmc
     ("chemistry",       re.compile(r"chem|atkins", re.I)),
-    # before engineering so machine_learning goes here, not to "machine"
     ("computer_science", re.compile(r"comput|program|algorithm|machine.learn|software|database|computer.secur", re.I)),
-    # stemez-Electric*/Electromagnetics/HeatTransfer/MachineDesign/FluidMechanics/
-    # TransportPhenomena, theoremQA-EECS, ori_mmlu-electrical_engineering
     ("engineering",     re.compile(r"electr|heat|machine|eecs|fluid|transport", re.I)),
-    # after engineering so Fluid/Electric subjects stay there; picks up
-    # stemez-Physics/Optics/Thermodynamics, scibench-thermo/class/quan/fund/matter,
-    # ori_mmlu-astronomy, stemez-Mechanics
     ("physics",         re.compile(r"physic|optic|thermo|quan|astronom|mechanic|matter|fund|\bclass\b|relativity", re.I)),
-    # math, algebra, calculus, scibench-stat/diff, formal_logic, statistics
     ("mathematics",     re.compile(r"math|algebra|calcul|stat|arithmetic|formal.logic|\bdiff\b", re.I)),
-    # stemez-Biology/Genetics, ori_mmlu-high_school_biology/college_biology/
-    # medical_genetics/anatomy/virology
     ("biology",         re.compile(r"bio|anatomy|genetic|physiolog|ecolog|evolution|virology", re.I)),
-    # professional_medicine, nutrition, clinical_knowledge, human_aging, sexuality
     ("medicine",        re.compile(r"medic|clinical|health|pharmac|nurs|disease|diagno|surgery|aging|sexuality|nutrit", re.I)),
     ("psychology",      re.compile(r"psycholog|cognitive|behavior|mental|neurosci", re.I)),
-    # prehistory matches via "histor" substring
     ("history",         re.compile(r"histor|ancient|medieval|civiliz", re.I)),
-    # global_facts, security_studies, government_and_politics, geography,
-    # world_religions, us_foreign_policy, sociology
     ("social_science",  re.compile(r"social|sociolog|anthropolog|politic|geograph|global|religion|securit|foreign.polic", re.I)),
-    # philosophy, moral_disputes, logical_fallacies; formal_logic caught by math above
     ("philosophy",      re.compile(r"philosoph|ethic|logic|moral|metaphys|fallaci", re.I)),
 ]
 
@@ -137,7 +94,6 @@ def _options_to_text(options: list[str]) -> str:
 
 
 def _categorize_subject(subject: str) -> str:
-    """Map a raw subject string to a broad category using regex. Returns 'other' if no match."""
     subject = subject or ""
     for category, pattern in SUBJECT_CATEGORY_PATTERNS:
         if pattern.search(subject):
@@ -146,10 +102,6 @@ def _categorize_subject(subject: str) -> str:
 
 
 def _subject_balanced_sample(dataset: Dataset, n: int, seed: int) -> Dataset:
-    """
-    Sample n rows with even representation across subject categories.
-    Uses round-robin so no single subject dominates.
-    """
     import random
     rng = random.Random(seed)
 
@@ -187,7 +139,6 @@ def sample_datasets(
         split: str = "test",
         seed: int = 42,
 ) -> Dataset:
-    """Fetch and sample the requested number of rows for each language."""
     total_requested = sum(samples_per_language)
     if len(samples_per_language) != len(LANGUAGES):
         raise ValueError(
@@ -246,13 +197,12 @@ def sample_datasets(
 
 
 def format_teacher_prompt(instruction: str, gold_answer: str, language: str) -> str:
-    """Build a prompt that enforces structured output format with rationalization."""
     lang_instruction = (
         "1. Identify the core concept or formula needed to solve this question."
         if language in ("en", "english") else
         "1. First, translate the question to English. Then, identify the core concept needed."
     )
-    
+
     return (
         "You are an expert multilingual reasoning assistant.\n"
         f"The correct answer to the following question is '{gold_answer}'. "
@@ -288,7 +238,6 @@ def generate_and_parse_batch(
         temperature: float,
         top_p: float,
 ) -> list[dict[str, str]]:
-    """Query the teacher on a batch of prompts and parse the outputs."""
     raw_generations = prompt_vllm(
         model,
         tokenizer,
@@ -312,8 +261,6 @@ def generate_and_parse_batch_with_logprobs(
         top_p: float,
         top_k: int,
 ) -> tuple[list[dict[str, str]], list[list], list[list[int]]]:
-    """Like generate_and_parse_batch but also returns per-token top-K log-probs
-    and the exact token IDs generated by the teacher for BPE-aligned KD."""
     raw_generations, all_logprobs, all_token_ids = prompt_vllm_with_logprobs(
         model,
         tokenizer,
@@ -331,13 +278,10 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="Query teacher and build train corpus JSONL"
     )
-    # ── required infrastructure args (no top-of-file default) ──
     parser.add_argument("--teacher_model", required=True,
                         help="HuggingFace model ID or local path")
     parser.add_argument("--output_file", required=True,
                         help="Output JSONL path for train corpus")
-
-    # ── hyperparameter overrides (default=None → falls back to top-of-file constants) ──
     parser.add_argument("--num_samples", type=str, default=None,
                         help="Comma-separated counts for en,hi,bn,kn,ta "
                              f"(default: {DEFAULT_NUM_SAMPLES})")
@@ -346,7 +290,6 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--temperature", type=float, default=None)
     parser.add_argument("--top_p", type=float, default=None)
     parser.add_argument("--seed", type=int, default=None)
-    # store_true with default=None: not passed → None (use constant); passed → True
     parser.add_argument("--filter_incorrect", action="store_true", default=None)
     parser.add_argument("--skip_unparsed", action="store_true", default=None)
     parser.add_argument("--top_k_logits", type=int, default=None,
@@ -356,8 +299,6 @@ def parse_args() -> argparse.Namespace:
                         help=f"vLLM GPU memory fraction (default: {DEFAULT_GPU_MEM_UTIL})")
     parser.add_argument("--tensor_parallel_size", type=int, default=None,
                         help=f"vLLM tensor parallel size (default: {DEFAULT_TENSOR_PARALLEL})")
-
-    # ── non-hyperparameter flags ──
     parser.add_argument("--split", default="test")
     parser.add_argument("--log_level", default="INFO",
                         choices=["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"])
@@ -394,14 +335,10 @@ def _resolve_arg(value, default):
     return default if value is None else value
 
 
-
-
-
 def main() -> None:
     args = parse_args()
     setup_logger(args.log_level)
 
-    # Resolve each hyperparameter: CLI value if explicitly passed, else top-of-file constant.
     num_samples_str = _resolve_arg(args.num_samples, DEFAULT_NUM_SAMPLES)
     batch_size = _resolve_arg(args.batch_size, DEFAULT_BATCH_SIZE)
     max_new_tokens = _resolve_arg(args.max_new_tokens, DEFAULT_MAX_NEW_TOKENS)
@@ -410,9 +347,7 @@ def main() -> None:
     gpu_mem_util = _resolve_arg(args.gpu_memory_utilization, DEFAULT_GPU_MEM_UTIL)
     tensor_parallel = _resolve_arg(args.tensor_parallel_size, DEFAULT_TENSOR_PARALLEL)
     seed = _resolve_arg(args.seed, DEFAULT_SEED)
-    filter_incorrect = _resolve_arg(
-        args.filter_incorrect, DEFAULT_FILTER_INCORRECT
-    )
+    filter_incorrect = _resolve_arg(args.filter_incorrect, DEFAULT_FILTER_INCORRECT)
     skip_unparsed = _resolve_arg(args.skip_unparsed, DEFAULT_SKIP_UNPARSED)
     top_k_logits = _resolve_arg(args.top_k_logits, DEFAULT_TOP_K_LOGITS)
 
@@ -480,8 +415,6 @@ def main() -> None:
                 )
                 batch_logprobs = [None] * len(parsed_batch)
                 batch_token_ids = [None] * len(parsed_batch)
-
-
 
             for row, question_with_choices, prompt, parsed, token_logprobs, token_ids in zip(
                 batch_rows, questions_with_choices, prompts, parsed_batch, batch_logprobs, batch_token_ids

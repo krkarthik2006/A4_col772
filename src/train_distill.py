@@ -22,19 +22,17 @@ from trl import DataCollatorForCompletionOnlyLM, SFTConfig, SFTTrainer
 
 LOGGER = logging.getLogger(__name__)
 
-# Response templates used by DataCollatorForCompletionOnlyLM to locate the
-# start of the assistant turn so prompt tokens can be masked out of the loss.
+# marks the start of the assistant turn — used to mask prompt tokens from the loss
 RESPONSE_TEMPLATES: dict[str, str] = {
     "qwen":  "<|im_start|>assistant\n",
     "llama": "<|start_header_id|>assistant<|end_header_id|>",
 }
 
-# Must match GENERATION_SYSTEM_MESSAGE and format_teacher_prompt in dataset_generation.py
-# exactly so training and inference context matches the teacher's generation context.
 GENERATION_SYSTEM_MESSAGE = (
     "You are a careful multilingual reasoning assistant that follows "
     "the requested output format exactly."
 )
+
 _LANG_NAMES: dict[str, str] = {
     "en": "English", "english": "English",
     "hindi": "Hindi", "bengali": "Bengali",
@@ -43,13 +41,12 @@ _LANG_NAMES: dict[str, str] = {
 
 
 def _format_student_prompt(instruction: str, language: str = "") -> str:
-    """Build the prompt the student will see at train/inference time."""
     lang_instruction = (
         "1. Identify the core concept or formula needed to solve this question."
         if language in ("en", "english") else
         "1. First, translate the question to English. Then, identify the core concept needed."
     )
-    
+
     return (
         "You are an expert multilingual reasoning assistant.\n"
         "Your task is to provide the step-by-step reasoning that leads to the correct answer.\n\n"
@@ -58,7 +55,7 @@ def _format_student_prompt(instruction: str, language: str = "") -> str:
         "2. Write all your reasoning and analysis entirely in English.\n"
         "3. Put all reasoning inside <reasoning> and </reasoning> tags.\n"
         "4. After the reasoning block, write exactly one final line in the format "
-        "'#### ANSWER: (LETTER)' where LETTER is a single capital letter A–J. "
+        "'#### ANSWER: (LETTER)' where LETTER is a single capital letter A-J. "
         "Do not write anything else on that line or after it.\n"
         "5. Stop immediately after writing the answer line.\n\n"
         "Question:\n"
@@ -80,7 +77,6 @@ def parse_args() -> argparse.Namespace:
         description="Offline CoT distillation: SFT student on teacher reasoning traces"
     )
 
-    # ── required / core ──────────────────────────────────────────────────────
     parser.add_argument("--student_model", required=True,
                         help="HuggingFace model ID or path to the student model")
     parser.add_argument("--teacher_model", required=False,
@@ -91,57 +87,41 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--output_dir", required=True,
                         help="Directory to save LoRA adapter (and optionally merged model)")
 
-    # ── basic training knobs ─────────────────────────────────────────────────
-    parser.add_argument("--batch_size", type=int, default=4,
-                        help="Per-device training batch size")
-    parser.add_argument("--epochs", type=int, default=3,
-                        help="Number of training epochs")
-    parser.add_argument("--lr", type=float, default=2e-4,
-                        help="Peak learning rate (2e-4 is appropriate for LoRA)")
-    parser.add_argument("--max_length", type=int, default=2048,
-                        help="Maximum tokenized sequence length")
+    parser.add_argument("--batch_size", type=int, default=4)
+    parser.add_argument("--epochs", type=int, default=3)
+    parser.add_argument("--lr", type=float, default=2e-4)
+    parser.add_argument("--max_length", type=int, default=2048)
     parser.add_argument(
         "--mask_prompt_tokens",
         action="store_true",
         help="Mask question tokens so loss is computed only on reasoning + answer",
     )
 
-    # ── LoRA / PEFT ──────────────────────────────────────────────────────────
-    parser.add_argument("--lora_r", type=int, default=16,
-                        help="LoRA rank (r)")
-    parser.add_argument("--lora_alpha", type=int, default=32,
-                        help="LoRA scaling factor (alpha = 2*r is a good default)")
-    parser.add_argument("--lora_dropout", type=float, default=0.05,
-                        help="Dropout probability on LoRA layers")
+    parser.add_argument("--lora_r", type=int, default=16)
+    parser.add_argument("--lora_alpha", type=int, default=32)
+    parser.add_argument("--lora_dropout", type=float, default=0.05)
     parser.add_argument("--use_qlora", action="store_true",
                         help="Load base model in 4-bit (NF4) for QLoRA training")
     parser.add_argument("--save_merged", action="store_true",
                         help="After training, merge LoRA weights into base and save "
                              "the full model to <output_dir>/merged/")
 
-    # ── optimiser schedule ───────────────────────────────────────────────────
-    parser.add_argument("--gradient_accumulation_steps", type=int, default=8,
-                        help="Gradient accumulation steps "
-                             "(effective_batch = batch_size × accum)")
-    parser.add_argument("--warmup_ratio", type=float, default=0.03,
-                        help="Fraction of total steps used for LR warmup")
+    parser.add_argument("--gradient_accumulation_steps", type=int, default=8)
+    parser.add_argument("--warmup_ratio", type=float, default=0.03)
 
-    # ── data filtering / validation ──────────────────────────────────────────
     parser.add_argument("--filter_correct_only", action="store_true",
                         help="Only train on examples where teacher_correct==True")
     parser.add_argument("--val_data", default="",
                         help="Optional path to validation JSONL for eval during training")
 
-    # ── soft-label KD (top-K logits) ─────────────────────────────────────────
     parser.add_argument("--top_k_logits", type=int, default=0,
-                        help="Use top-K soft-label KD loss (0 = disabled, paper default: 10). "
+                        help="Use top-K soft-label KD loss (0 = disabled). "
                              "Requires teacher_top_k_logits field in train_data.")
     parser.add_argument("--kd_alpha", type=float, default=0.5,
-                        help="Weight of the KD loss: total = (1-α)·CE + α·T²·KL")
+                        help="Weight of the KD loss: total = (1-alpha)*CE + alpha*T^2*KL")
     parser.add_argument("--kd_temperature", type=float, default=1.0,
                         help="Temperature T for teacher/student distribution sharpening")
 
-    # ── logging ──────────────────────────────────────────────────────────────
     parser.add_argument(
         "--log_level",
         default="INFO",
@@ -151,10 +131,7 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
-# ── Helpers ──────────────────────────────────────────────────────────────────
-
 def detect_model_family(model_path: str) -> str:
-    """Return 'llama' or 'qwen' based on the model name/path."""
     return "llama" if "llama" in model_path.lower() else "qwen"
 
 
@@ -168,23 +145,12 @@ def load_jsonl(path: str) -> list[dict]:
 
 
 def _fit_question(question: str, final_answer: str, tokenizer, max_tokens: int) -> str:
-    """
-    Fit the question+options into max_tokens, guaranteeing the correct option is kept.
-
-    Strategy:
-      1. If it already fits, return as-is.
-      2. Otherwise split into stem and option lines. Always keep the correct option.
-         Fill remaining budget with other options (in original order). Truncate the
-         stem last if still needed.
-    """
     ids = tokenizer.encode(question, add_special_tokens=False)
     if len(ids) <= max_tokens:
         return question
 
-    # Split stem from options block (separated by first \n\n)
     parts = question.split("\n\n", 1)
     if len(parts) != 2:
-        # No options block detected — just truncate the stem
         return tokenizer.decode(ids[:max_tokens], skip_special_tokens=True)
 
     stem, options_block = parts
@@ -197,7 +163,6 @@ def _fit_question(question: str, final_answer: str, tokenizer, max_tokens: int) 
         else:
             other_lines.append(line)
 
-    # Build with correct option guaranteed; greedily add others that still fit
     kept = [correct_line] if correct_line else []
     base = f"{stem}\n\n" + "\n".join(kept)
     budget = max_tokens - len(tokenizer.encode(base, add_special_tokens=False))
@@ -208,45 +173,28 @@ def _fit_question(question: str, final_answer: str, tokenizer, max_tokens: int) 
             kept.append(line)
             budget -= line_cost
 
-    # Restore original option order (sort by letter)
     kept.sort(key=lambda l: l[1] if l.startswith("(") else "Z")
     options_text = "\n".join(kept)
 
-    # If stem itself is too long after options are fixed, truncate it
     stem_budget = max_tokens - len(tokenizer.encode("\n\n" + options_text, add_special_tokens=False))
     stem_ids = tokenizer.encode(stem, add_special_tokens=False)
     if len(stem_ids) > stem_budget:
-        # Tail-truncate: MMLU-Pro puts the actual question sentence at the end of
-        # the stem; keeping the tail preserves it at the cost of background context.
+        # keep the tail so the actual question sentence isn't lost
         stem = tokenizer.decode(stem_ids[-stem_budget:], skip_special_tokens=True)
 
     return f"{stem}\n\n{options_text}"
 
 
 def build_training_text(row: dict, tokenizer, max_question_tokens: int = 1200) -> str:
-    """
-    Construct a full chat-templated string for one training example.
-
-    Input format (from dataset_generation.py output):
-      - row["question"]       : full MCQ text with options
-      - row["reasoning"]      : teacher reasoning extracted from <reasoning>…</reasoning>
-      - row["final_answer"]   : parsed answer letter (A–J)
-      - row["gold_answer"]    : ground-truth letter (fallback)
-
-    Output: tokenizer.apply_chat_template result (no generation prompt suffix).
-    """
     final_answer = row.get("final_answer") or row.get("gold_answer", "")
     reasoning = row.get("reasoning", "").strip()
 
-    # User content: always construct the student prompt from scratch so the
-    # student doesn't see the teacher's gold-answer-infused rationalization prompt.
     user_content = _format_student_prompt(
         _fit_question(row["question"], final_answer, tokenizer, max_question_tokens),
         row.get("language", "en"),
     )
 
-    # Assistant content: use exact teacher generation for tokenization alignment;
-    # fall back to manual template only when the field is absent.
+    # use exact teacher generation so tokenization aligns with stored top-k logits
     teacher_gen = (row.get("teacher_generation") or "").strip()
     if teacher_gen:
         assistant_content = teacher_gen
@@ -264,10 +212,8 @@ def build_training_text(row: dict, tokenizer, max_question_tokens: int = 1200) -
     text = tokenizer.apply_chat_template(
         messages, tokenize=False, add_generation_prompt=False
     )
-    # LLaMA-3's chat template already embeds <|begin_of_text|> in the returned
-    # string. If the SFTTrainer tokenizer then tokenizes with add_special_tokens=True
-    # (the default), it prepends another BOS, producing a double BOS. Strip the
-    # leading BOS from the template output so the tokenizer adds exactly one.
+    # llama's chat template embeds <|begin_of_text|> in the string already;
+    # strip it so the tokenizer doesn't prepend a second one
     bos = tokenizer.bos_token
     if bos and text.startswith(bos):
         text = text[len(bos):]
@@ -280,9 +226,7 @@ def prepare_dataset(
     filter_correct_only: bool = False,
     max_length: int = 2048,
 ) -> Dataset:
-    """Load and format JSONL into a HuggingFace Dataset with a single 'text' column."""
     rows = load_training_rows(data_path, filter_correct_only=filter_correct_only)
-    # Reserve 848 for response + 250 for system message and format instructions.
     max_question_tokens = max_length - 848 - 250
     texts = [build_training_text(r, tokenizer, max_question_tokens=max_question_tokens) for r in rows]
     return Dataset.from_dict({"text": texts})
@@ -308,10 +252,8 @@ def load_training_rows(
     return rows
 
 
-# ── Top-K soft-label KD helpers ──────────────────────────────────────────────
-
 def _find_sublist(haystack: list, needle: list) -> int:
-    """Return the start index of needle in haystack, or -1 if not found."""
+    """return start index of needle in haystack, or -1"""
     n = len(needle)
     for i in range(len(haystack) - n + 1):
         if haystack[i : i + n] == needle:
@@ -326,24 +268,10 @@ def tokenize_with_kd(
     top_k: int,
     max_length: int,
 ) -> dict:
-    """Tokenize one example and align stored teacher top-K logprobs with token positions.
-
-    teacher_top_k_ids / teacher_top_k_vals shape: [seq_len, top_k].
-    Index i in those tensors corresponds to model logits[:, i, :], i.e. the
-    distribution that predicts input_ids[i+1].  Positions without teacher data
-    are filled with -1 / 0.0 and masked out in the KD loss.
-
-    When teacher_generated_ids is present (same-family Qwen→Qwen KD), the exact
-    vLLM token IDs are concatenated directly after the prompt to guarantee 1:1
-    alignment between teacher_top_k_logits[j] and the student's prediction at
-    position (len(prompt_ids) + j).  This bypasses BPE re-tokenization artefacts
-    that arise when the full chat string is encoded as one piece.
-    """
     teacher_ids: list[int] | None = row.get("teacher_generated_ids")
 
     if teacher_ids:
-        # ── Direct-alignment path (same-family KD) ────────────────────────────
-        # Reconstruct the exact prompt string the student should see.
+        # same-family path: use exact teacher token ids to avoid re-tokenization drift
         user_content = _format_student_prompt(
             row["question"], row.get("language", "en")
         )
@@ -367,7 +295,7 @@ def tokenize_with_kd(
         logit_offset = n_prompt - 1
 
     else:
-        # ── Fallback: re-tokenise the full chat string ────────────────────────
+        # fallback: re-tokenize the whole chat string
         text = build_training_text(row, tokenizer)
         enc = tokenizer(
             text,
@@ -388,7 +316,6 @@ def tokenize_with_kd(
             labels[resp_start:] = full_ids[resp_start:]
             logit_offset = resp_start - 1
 
-    # ── Align teacher logits ──────────────────────────────────────────────────
     t_ids  = [[-1]  * top_k for _ in range(seq_len)]
     t_vals = [[0.0] * top_k for _ in range(seq_len)]
 
@@ -431,7 +358,7 @@ def prepare_kd_dataset(
 
 
 class TopKLogitCollator:
-    """Pads pre-tokenised KD examples and stacks teacher top-K tensors."""
+    """pads pre-tokenized KD examples and stacks teacher top-K tensors into a batch"""
 
     def __init__(self, tokenizer, top_k: int) -> None:
         self.pad_id = tokenizer.pad_token_id
@@ -461,13 +388,7 @@ class TopKLogitCollator:
 
 
 class KDTrainer(Trainer):
-    """Trainer that mixes cross-entropy with top-K soft-label KL divergence.
-
-    Loss = (1 - kd_alpha) * CE  +  kd_alpha * T² * KL(p_T || p_S)
-
-    where p_T and p_S are renormalised over the top-K teacher positions with
-    temperature T, following MiniLLM / DistiLLM conventions.
-    """
+    """mixes CE with top-K soft-label KL: loss = (1-alpha)*CE + alpha*T^2*KL(p_T || p_S)"""
 
     def __init__(self, *args, kd_alpha: float = 0.5, kd_temperature: float = 1.0, **kwargs):
         super().__init__(*args, **kwargs)
@@ -475,8 +396,8 @@ class KDTrainer(Trainer):
         self.kd_temperature = kd_temperature
 
     def compute_loss(self, model, inputs, return_outputs=False, num_items_in_batch=None):
-        t_ids = inputs.pop("teacher_top_k_ids", None)   # [B, L, K]
-        t_vals = inputs.pop("teacher_top_k_vals", None)  # [B, L, K]  (log-probs)
+        t_ids = inputs.pop("teacher_top_k_ids", None)
+        t_vals = inputs.pop("teacher_top_k_vals", None)
 
         outputs = model(**inputs)
         ce_loss = outputs.loss
@@ -484,31 +405,24 @@ class KDTrainer(Trainer):
         if t_ids is None or self.kd_alpha == 0.0:
             return (ce_loss, outputs) if return_outputs else ce_loss
 
-        # has_teacher: True at positions where teacher data was stored.
-        has_teacher = t_ids[:, :, 0] >= 0  # [B, L]
+        has_teacher = t_ids[:, :, 0] >= 0
         if not has_teacher.any():
             return (ce_loss, outputs) if return_outputs else ce_loss
 
         T = self.kd_temperature
-        student_logits = outputs.logits  # [B, L, V]
+        student_logits = outputs.logits
 
-        # Gather student logits at the teacher's top-K vocabulary positions.
-        safe_ids = t_ids.clamp(min=0)                              # [B, L, K]
-        s_topk = student_logits.gather(dim=-1, index=safe_ids)    # [B, L, K]
+        safe_ids = t_ids.clamp(min=0)
+        s_topk = student_logits.gather(dim=-1, index=safe_ids)
 
-        # Teacher: renormalise top-K distribution with temperature T.
-        # t_vals are log-probs; dividing by T and applying softmax gives
-        # p_T(k) ∝ p_teacher(k)^(1/T), consistent with the paper's formula.
-        t_log_probs = F.log_softmax(t_vals / T, dim=-1)   # [B, L, K]
+        t_log_probs = F.log_softmax(t_vals / T, dim=-1)
 
-        # Student: compute log-probs over the FULL vocabulary so that probability
-        # mass leaking to non-top-K tokens is correctly penalized.
+        # student log-probs over full vocab so non-top-K mass is accounted for
         student_logits_scaled = student_logits / T
-        lse = torch.logsumexp(student_logits_scaled, dim=-1, keepdim=True)  # [B, L, 1]
-        s_log_probs = s_topk / T - lse  # [B, L, K]
+        lse = torch.logsumexp(student_logits_scaled, dim=-1, keepdim=True)
+        s_log_probs = s_topk / T - lse
 
-        # KL(p_T || p_S) per position, using F.kl_div which handles 0·log0 = 0.
-        kl = F.kl_div(s_log_probs, t_log_probs.exp(), reduction="none").sum(dim=-1)  # [B, L]
+        kl = F.kl_div(s_log_probs, t_log_probs.exp(), reduction="none").sum(dim=-1)
 
         mask = has_teacher.float()
         kl_loss = (kl * mask).sum() / mask.sum().clamp(min=1)
@@ -517,10 +431,7 @@ class KDTrainer(Trainer):
         return (loss, outputs) if return_outputs else loss
 
 
-# ── Model / config builders ───────────────────────────────────────────────────
-
 def get_bnb_config() -> BitsAndBytesConfig:
-    """4-bit NF4 quantisation config for QLoRA."""
     return BitsAndBytesConfig(
         load_in_4bit=True,
         bnb_4bit_quant_type="nf4",
@@ -530,10 +441,6 @@ def get_bnb_config() -> BitsAndBytesConfig:
 
 
 def get_lora_config(args: argparse.Namespace) -> LoraConfig:
-    """
-    LoRA applied to all attention + FFN projection layers.
-    The 7-module list is identical for Qwen2.5 and LLaMA-3.2.
-    """
     return LoraConfig(
         task_type=TaskType.CAUSAL_LM,
         r=args.lora_r,
@@ -549,17 +456,14 @@ def get_lora_config(args: argparse.Namespace) -> LoraConfig:
 
 
 def load_student(args: argparse.Namespace):
-    """Load student tokenizer + model, with optional QLoRA quantisation."""
     LOGGER.info("Loading tokenizer from %s", args.student_model)
     tokenizer = AutoTokenizer.from_pretrained(
         args.student_model,
         trust_remote_code=True,
         local_files_only=True,
     )
-    # Some models (e.g. LLaMA-3.2) ship without a pad token.
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
-    # Right-padding keeps attention masks aligned with labels during SFT.
     tokenizer.padding_side = "right"
 
     model_kwargs: dict = dict(
@@ -572,7 +476,7 @@ def load_student(args: argparse.Namespace):
 
     LOGGER.info("Loading student model from %s", args.student_model)
     model = AutoModelForCausalLM.from_pretrained(args.student_model, local_files_only=True, **model_kwargs)
-    # Disable KV-cache so gradient checkpointing works correctly.
+    # disable kv cache so gradient checkpointing works correctly
     model.config.use_cache = False
 
     if args.use_qlora:
@@ -580,8 +484,6 @@ def load_student(args: argparse.Namespace):
 
     return model, tokenizer
 
-
-# ── Main ─────────────────────────────────────────────────────────────────────
 
 def main() -> None:
     args = parse_args()
@@ -597,7 +499,6 @@ def main() -> None:
 
     lora_config = get_lora_config(args)
 
-    # Common training argument values shared by both training paths.
     common_training_kwargs = dict(
         output_dir=str(output_dir),
         per_device_train_batch_size=args.batch_size,
@@ -630,7 +531,6 @@ def main() -> None:
         args.top_k_logits = 0
 
     if args.top_k_logits > 0:
-        # ── Soft-label KD path ────────────────────────────────────────────────
         LOGGER.info(
             "KD mode: top_k=%d, alpha=%.2f, temperature=%.2f",
             args.top_k_logits, args.kd_alpha, args.kd_temperature,
@@ -674,7 +574,6 @@ def main() -> None:
         )
 
     else:
-        # ── Standard SFT path ─────────────────────────────────────────────────
         train_dataset = prepare_dataset(
             args.train_data, tokenizer,
             filter_correct_only=args.filter_correct_only,
@@ -694,11 +593,11 @@ def main() -> None:
                 tokenizer=tokenizer,
             )
             LOGGER.info(
-                "Prompt masking ON — response template: %r (%d tokens)",
+                "Prompt masking ON - response template: %r (%d tokens)",
                 resp_template, len(resp_template_ids),
             )
         else:
-            LOGGER.info("Prompt masking OFF — loss computed on full sequence")
+            LOGGER.info("Prompt masking OFF - loss computed on full sequence")
 
         training_args = SFTConfig(
             **common_training_kwargs,
@@ -721,7 +620,7 @@ def main() -> None:
 
     LOGGER.info(
         "Starting training: %d examples, %d epochs, lr=%.2e, "
-        "batch=%d×%d (effective %d), LoRA r=%d α=%d",
+        "batch=%d x %d (effective %d), LoRA r=%d alpha=%d",
         len(train_dataset), args.epochs, args.lr,
         args.batch_size, args.gradient_accumulation_steps,
         args.batch_size * args.gradient_accumulation_steps,
@@ -729,14 +628,12 @@ def main() -> None:
     )
     trainer.train()
 
-    # ── save adapter ─────────────────────────────────────────────────────────
     LOGGER.info("Saving LoRA adapter to %s", output_dir)
     trainer.save_model(str(output_dir))
     tokenizer.save_pretrained(str(output_dir))
 
-    # ── optional: merge LoRA into base and save full model ───────────────────
     if args.save_merged:
-        LOGGER.info("Merging LoRA weights into base model…")
+        LOGGER.info("Merging LoRA weights into base model...")
         merged_model = trainer.model.merge_and_unload()
         merged_dir = output_dir / "merged"
         merged_dir.mkdir(exist_ok=True)

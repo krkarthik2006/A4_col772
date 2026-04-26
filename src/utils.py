@@ -78,14 +78,6 @@ def prompt_vllm_with_logprobs(
     repetition_penalty: float = 1.0,
     use_tqdm: bool = True,
 ):
-    """Like prompt_vllm but also returns top-K log-probs per generated token.
-
-    Returns:
-        texts: list of generated strings
-        all_logprobs: list of lists; each inner list has one entry per generated
-            token, and each entry is a list of (token_id, log_prob) pairs sorted
-            by log_prob descending (length <= top_k).
-    """
     prompts = [build_vllm_prompt(tokenizer, messages) for messages in batch_messages]
     sampling_params = SamplingParams(
         temperature=temperature,
@@ -107,12 +99,9 @@ def prompt_vllm_with_logprobs(
             continue
         out = output.outputs[0]
         texts.append(out.text)
-        # Capture the exact token IDs the teacher generated so callers can
-        # bypass re-tokenization and guarantee 1:1 logit alignment.
         all_token_ids.append(list(out.token_ids))
         token_logprobs: list[list[tuple[int, float]]] = []
         for step_lps in (out.logprobs or []):
-            # step_lps: dict[int, Logprob]; Logprob.logprob is the log-probability
             pairs = sorted(
                 [(tok_id, lp.logprob) for tok_id, lp in step_lps.items()],
                 key=lambda x: x[1],
